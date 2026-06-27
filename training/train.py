@@ -6,6 +6,7 @@ import sys
 import time
 from typing import Optional
 
+from datasets import load_dataset as _load_dataset  # noqa: F401 — must import before torch on Windows
 import torch
 from torch.utils.data import DataLoader
 
