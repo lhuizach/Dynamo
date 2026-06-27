@@ -145,9 +145,15 @@ input:checked+.slider:before{transform:translateX(16px);background:#fff}
     </div>
     <div class="field-row">
       <div class="field"><label>Save Every</label><input id="cSaveEvery" value="1000"></div>
-      <div class="field"><label>No BNB</label>
-        <select id="cNoBnb"><option value="true" selected>Yes (AdamW)</option><option value="false">No (Adam8bit)</option></select>
+      <div class="field"><label>Optimizer</label>
+        <select id="cNoBnb"><option value="false">Adam8bit (bnb)</option><option value="true">AdamW (fallback)</option></select>
       </div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>torch.compile</label>
+        <select id="cCompile"><option value="false" selected>Off</option><option value="true">On (+20-40% speed)</option></select>
+      </div>
+      <div class="field"><label>TF32</label><input value="enabled (auto)" disabled style="color:#484f58"></div>
     </div>
     <div class="btn-row">
       <button class="btn-start" id="btnStart" onclick="startTraining()">▶ Start</button>
@@ -301,6 +307,7 @@ function buildArgs(resume) {
     log_every:+document.getElementById('cLogEvery').value,
     save_every:+document.getElementById('cSaveEvery').value,
     no_bnb: document.getElementById('cNoBnb').value==='true',
+    compile: document.getElementById('cCompile').value==='true',
     resume,
   };
 }
@@ -382,8 +389,10 @@ def _do_start(config: dict, resume: bool = False) -> None:
         "--log-every", str(config.get("log_every", 100)),
         "--save-every", str(config.get("save_every", 1000)),
     ]
-    if config.get("no_bnb", True):
+    if config.get("no_bnb", False):
         cmd.append("--no-bnb")
+    if config.get("compile", False):
+        cmd.append("--compile")
     if resume:
         cmd.append("--resume")
     _proc = subprocess.Popen(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))

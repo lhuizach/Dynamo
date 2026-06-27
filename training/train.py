@@ -55,12 +55,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--languages", nargs="*", default=None)
     p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
     p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint in output dir")
+    p.add_argument("--compile", action="store_true", help="Apply torch.compile() for ~20-40%% speedup (may not work on all setups)")
     return p.parse_args()
 
 
 def main(args: argparse.Namespace) -> None:
     os.makedirs(args.output, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     tokenizer = DynamoTokenizer(args.tokenizer)
     config = ModelConfig(
@@ -89,12 +94,20 @@ def main(args: argparse.Namespace) -> None:
         else:
             print("No checkpoint found — starting from scratch")
 
+    if args.compile:
+        try:
+            model = torch.compile(model)
+            print("torch.compile() enabled")
+        except Exception as e:
+            print(f"torch.compile() failed ({e}), continuing without it")
+
     if args.no_bnb:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
         print("Using AdamW (--no-bnb)")
     else:
         import bitsandbytes as bnb
         optimizer = bnb.optim.Adam8bit(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
+        print("Using Adam8bit (bitsandbytes)")
 
     use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
