@@ -167,10 +167,12 @@ class Dynamo(nn.Module):
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :]
 
-            # penalise tokens that already appear in the context
+            # penalise tokens proportional to how recently they appeared
             if repetition_penalty != 1.0:
-                for token_id in set(idx[0].tolist()):
-                    logits[0, token_id] /= repetition_penalty
+                recent = idx[0, -64:].tolist()  # last 64 tokens
+                for token_id in set(recent):
+                    count = recent.count(token_id)
+                    logits[0, token_id] /= (repetition_penalty ** count)
 
             logits = logits / temperature
 
