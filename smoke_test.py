@@ -121,7 +121,7 @@ def main() -> None:
     assert out.shape == (1, len(prompt_ids) + 16), f"unexpected shape {out.shape}"
     ckpt_path = os.path.join(tmpdir, "smoke.pt")
     torch.save({"config": config, "model": model.state_dict()}, ckpt_path)
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     reloaded = Dynamo(ckpt["config"])
     reloaded.load_state_dict(ckpt["model"])
     print(f"     generated {out.shape[1]} tokens  checkpoint saved + reloaded  OK")

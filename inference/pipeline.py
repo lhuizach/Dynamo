@@ -78,7 +78,7 @@ class DynamoPipeline:
         self.max_new_tokens = max_new_tokens
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        ckpt = torch.load(checkpoint, map_location="cpu")
+        ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
         config: ModelConfig = ckpt["config"]
         self.model = Dynamo(config).to(self.device)
         self.model.load_state_dict(ckpt["model"])

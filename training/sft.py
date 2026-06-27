@@ -68,7 +68,7 @@ def main(args: argparse.Namespace) -> None:
     os.makedirs(args.output, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config: ModelConfig = ckpt["config"]
     tokenizer = DynamoTokenizer(args.tokenizer)
 
