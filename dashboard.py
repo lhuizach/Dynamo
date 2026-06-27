@@ -160,9 +160,14 @@ input:checked+.slider:before{transform:translateX(16px);background:#fff}
     </div>
     <div class="field-row">
       <div class="field"><label>torch.compile</label>
-        <select id="cCompile"><option value="false" selected>Off (Triton unavailable on Windows)</option><option value="true">On (Linux/WSL only)</option></select>
+        <select id="cCompile"><option value="false" selected>Off</option><option value="true">On (WSL2 only)</option></select>
       </div>
-      <div class="field"><label>TF32</label><input value="enabled (auto)" disabled style="color:#484f58"></div>
+      <div class="field"><label>Backend</label>
+        <select id="cWsl" onchange="onBackendChange(this.value)">
+          <option value="false" selected>Windows Python</option>
+          <option value="true">WSL2 + Triton</option>
+        </select>
+      </div>
     </div>
     <div class="btn-row">
       <button class="btn-start" id="btnStart" onclick="startTraining()">▶ Start</button>
@@ -317,6 +322,7 @@ function buildArgs(resume) {
     save_every:+document.getElementById('cSaveEvery').value,
     no_bnb: document.getElementById('cNoBnb').value==='true',
     compile: document.getElementById('cCompile').value==='true',
+    wsl: document.getElementById('cWsl').value==='true',
     resume,
   };
 }
@@ -341,6 +347,15 @@ async function toggleScheduler() {
   const enabled = document.getElementById('schedEnabled').checked;
   document.getElementById('schedLabel').textContent = enabled ? 'Scheduler enabled' : 'Scheduler disabled';
   await fetch('/schedules/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled})});
+}
+
+function onBackendChange(val) {
+  const comp = document.getElementById('cCompile');
+  if (val === 'true') {
+    comp.value = 'true';
+  } else {
+    comp.value = 'false';
+  }
 }
 
 function fmtTime(sec) {
@@ -375,21 +390,16 @@ def _scheduler_loop() -> None:
         time.sleep(60 - datetime.now().second)  # sleep until next minute boundary
 
 
-def _do_start(config: dict, resume: bool = False) -> None:
-    global _proc, _start_time, _last_config
-    if _proc is not None and _proc.poll() is None:
-        return
-    if not config:
-        return
-    _last_config = config
-    cmd = [sys.executable, "training/train.py",
+def _build_train_args(config: dict, resume: bool) -> list[str]:
+    args = [
+        "training/train.py",
         "--tokenizer", "tokenizer/dynamo.json", "--output", "dynamo/",
         "--dim", str(config.get("dim", 2048)),
         "--n-layers", str(config.get("n_layers", 16)),
         "--n-heads", str(config.get("n_heads", 16)),
         "--n-kv-heads", str(config.get("n_kv_heads", 4)),
         "--ffn-dim", str(config.get("ffn_dim", 5632)),
-        "--seq-len", str(config.get("seq_len", 4096)),
+        "--seq-len", str(config.get("seq_len", 2048)),
         "--batch-size", str(config.get("batch_size", 1)),
         "--grad-accum", str(config.get("grad_accum", 16)),
         "--max-steps", str(config.get("max_steps", 100_000)),
@@ -399,12 +409,38 @@ def _do_start(config: dict, resume: bool = False) -> None:
         "--save-every", str(config.get("save_every", 1000)),
     ]
     if config.get("no_bnb", False):
-        cmd.append("--no-bnb")
+        args.append("--no-bnb")
     if config.get("compile", False):
-        cmd.append("--compile")
+        args.append("--compile")
     if resume:
-        cmd.append("--resume")
-    _proc = subprocess.Popen(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))
+        args.append("--resume")
+    return args
+
+
+def _do_start(config: dict, resume: bool = False) -> None:
+    global _proc, _start_time, _last_config
+    if _proc is not None and _proc.poll() is None:
+        return
+    if not config:
+        return
+    _last_config = config
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    train_args = _build_train_args(config, resume)
+
+    use_wsl = config.get("wsl", False)
+    if use_wsl:
+        # run via WSL2 — activate the dynamo-env venv then exec
+        wsl_project = "/mnt/c/Users/lhuir/Dynamo"
+        inner = (
+            "source ~/dynamo-env/bin/activate && "
+            f"cd {wsl_project} && "
+            "python3 " + " ".join(train_args)
+        )
+        cmd = ["wsl", "bash", "-c", inner]
+    else:
+        cmd = [sys.executable] + train_args
+
+    _proc = subprocess.Popen(cmd, cwd=cwd)
     _start_time = time.time()
 
 
