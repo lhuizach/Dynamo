@@ -1,10 +1,18 @@
 """Dynamo web UI — single file. Run: python server.py"""
 from __future__ import annotations
 import argparse
+import logging
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# suppress noisy GET logs
+class _HideGets(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "GET /" not in record.getMessage()
+
+logging.getLogger("werkzeug").addFilter(_HideGets())
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en">

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import glob
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -11,6 +12,14 @@ from datetime import datetime
 from typing import Optional
 
 from flask import Flask, jsonify, request
+
+# suppress noisy GET request logs — only show POSTs, errors, and training output
+class _HideGets(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "GET /" not in msg
+
+logging.getLogger("werkzeug").addFilter(_HideGets())
 
 app = Flask(__name__)
 _proc: Optional[subprocess.Popen] = None
@@ -129,7 +138,7 @@ input:checked+.slider:before{transform:translateX(16px);background:#fff}
     </div>
     <div class="field-row">
       <div class="field"><label>FFN Dim</label><input id="cFfn" value="5632"></div>
-      <div class="field"><label>Seq Len</label><input id="cSeqLen" value="4096"></div>
+      <div class="field"><label>Seq Len</label><input id="cSeqLen" value="2048"></div>
     </div>
     <div class="field-row">
       <div class="field"><label>Batch Size</label><input id="cBatch" value="1"></div>
@@ -151,7 +160,7 @@ input:checked+.slider:before{transform:translateX(16px);background:#fff}
     </div>
     <div class="field-row">
       <div class="field"><label>torch.compile</label>
-        <select id="cCompile"><option value="false" selected>Off</option><option value="true">On (+20-40% speed)</option></select>
+        <select id="cCompile"><option value="true" selected>On (+20-40% speed)</option><option value="false">Off</option></select>
       </div>
       <div class="field"><label>TF32</label><input value="enabled (auto)" disabled style="color:#484f58"></div>
     </div>
