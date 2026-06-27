@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--languages", nargs="*", default=None)
+    p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
     return p.parse_args()
 
 
@@ -74,7 +75,11 @@ def main(args: argparse.Namespace) -> None:
     for block in model.layers:
         block.use_checkpoint = True
 
-    optimizer = bnb.optim.Adam8bit(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
+    if args.no_bnb:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
+        print("Using AdamW (--no-bnb)")
+    else:
+        optimizer = bnb.optim.Adam8bit(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
 
     use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
