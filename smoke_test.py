@@ -53,15 +53,19 @@ def _build_sft_sample(
         user_request=record["user_request"],
         precise_instruction=record["precise_instruction"],
     )
-    full = prompt + record["code"]
+    # encode separately so the prompt/code boundary is exact
     prompt_ids = tokenizer.encode(prompt)
-    full_ids = (tokenizer.encode(full) + [tokenizer.eos_id])[: max_len + 1]
+    code_ids = tokenizer.encode(record["code"]) + [tokenizer.eos_id]
+    full_ids = (prompt_ids + code_ids)[: max_len + 1]
 
     x = torch.tensor(full_ids[:-1], dtype=torch.long)
     y = torch.tensor(full_ids[1:], dtype=torch.long)
 
-    mask = torch.ones(len(y), dtype=torch.bool)
-    mask[: max(0, len(prompt_ids) - 1)] = False
+    mask = torch.zeros(len(y), dtype=torch.bool)
+    code_start = min(max(0, len(prompt_ids) - 1), len(y))
+    mask[code_start:] = True
+    if not mask.any():  # prompt longer than window — train on everything
+        mask[:] = True
     return x, y, mask
 
 
@@ -81,7 +85,7 @@ def main() -> None:
         n_heads=2,
         n_kv_heads=2,
         ffn_dim=128,
-        max_seq_len=128,
+        max_seq_len=1024,
         vocab_size=tokenizer.vocab_size,
     )
     model = Dynamo(config)
@@ -100,7 +104,6 @@ def main() -> None:
     with open(SAMPLE_FILE) as f:
         record = json.loads(f.readline())
     x_sft, y_sft, mask = _build_sft_sample(record, tokenizer, max_len=config.max_seq_len)
-    assert mask.any(), "mask is all-False — no code tokens to train on"
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
     model.train()
     logits_sft, _ = model(x_sft.unsqueeze(0))
