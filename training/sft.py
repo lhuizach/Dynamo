@@ -8,7 +8,6 @@ from typing import List, Tuple
 
 import torch
 import torch.nn.functional as F
-import bitsandbytes as bnb
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,11 +74,12 @@ def main(args: argparse.Namespace) -> None:
     model = Dynamo(config).to(device)
     model.load_state_dict(ckpt["model"])
 
+    import bitsandbytes as bnb
     optimizer = bnb.optim.Adam8bit(model.parameters(), lr=args.lr, betas=(0.9, 0.95))
 
     use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda" and not use_bf16))
+    scaler = torch.amp.GradScaler(device, enabled=(device == "cuda" and not use_bf16))
 
     records = load_records(args.data)
     if not records:

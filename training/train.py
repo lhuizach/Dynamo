@@ -7,7 +7,6 @@ import time
 from typing import Optional
 
 import torch
-import bitsandbytes as bnb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -79,11 +78,12 @@ def main(args: argparse.Namespace) -> None:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
         print("Using AdamW (--no-bnb)")
     else:
+        import bitsandbytes as bnb
         optimizer = bnb.optim.Adam8bit(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
 
     use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda" and not use_bf16))
+    scaler = torch.amp.GradScaler(device, enabled=(device == "cuda" and not use_bf16))
 
     dataset = CodeDataset(tokenizer, args.seq_len, args.languages)
     loader = DataLoader(dataset, batch_size=args.batch_size)
