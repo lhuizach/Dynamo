@@ -164,6 +164,7 @@ def main() -> None:
         temperature: float = float(data.get("temperature", 0.8))
         max_tokens: int = int(data.get("max_tokens", 200))
 
+        rep_penalty: float = float(data.get("repetition_penalty", 1.3))
         ids = tok.encode(prompt)
         idx = torch.tensor([ids], device=dev)
         with torch.no_grad():
@@ -172,6 +173,7 @@ def main() -> None:
                 max_new_tokens=max_tokens,
                 temperature=temperature,
                 eos_id=tok.eos_id,
+                repetition_penalty=rep_penalty,
             )
         gen_ids = out[0][len(ids):].tolist()
         return jsonify({"prompt": prompt, "generated": tok.decode(gen_ids), "tokens": len(gen_ids)})

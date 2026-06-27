@@ -160,11 +160,19 @@ class Dynamo(nn.Module):
         temperature: float = 1.0,
         top_p: float = 0.9,
         eos_id: Optional[int] = None,
+        repetition_penalty: float = 1.3,
     ) -> torch.Tensor:
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.config.max_seq_len:]
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :]
+
+            # penalise tokens that already appear in the context
+            if repetition_penalty != 1.0:
+                for token_id in set(idx[0].tolist()):
+                    logits[0, token_id] /= repetition_penalty
+
+            logits = logits / temperature
 
             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
             sorted_probs = F.softmax(sorted_logits, dim=-1)
