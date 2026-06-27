@@ -1,5 +1,7 @@
 from __future__ import annotations
 import argparse
+import glob
+import json
 import math
 import os
 import sys
@@ -52,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--languages", nargs="*", default=None)
     p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
+    p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint in output dir")
     return p.parse_args()
 
 
@@ -74,6 +77,18 @@ def main(args: argparse.Namespace) -> None:
     for block in model.layers:
         block.use_checkpoint = True
 
+    step = 0
+    if args.resume:
+        candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
+        if candidates:
+            ckpt_path = candidates[-1]
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(ckpt["model"])
+            step = ckpt["step"]
+            print(f"Resumed from {ckpt_path} (step {step})")
+        else:
+            print("No checkpoint found — starting from scratch")
+
     if args.no_bnb:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
         print("Using AdamW (--no-bnb)")
@@ -88,8 +103,11 @@ def main(args: argparse.Namespace) -> None:
     dataset = CodeDataset(tokenizer, args.seq_len, args.languages)
     loader = DataLoader(dataset, batch_size=args.batch_size)
 
-    step = 0
-    micro_step = 0
+    log_path = os.path.join(args.output, "training_log.jsonl")
+    if not args.resume:
+        open(log_path, "w").close()  # reset log on fresh run
+
+    micro_step = step * args.grad_accum
     tokens_seen = 0
     loss_accum = 0.0
     t0 = time.time()
@@ -124,6 +142,12 @@ def main(args: argparse.Namespace) -> None:
                 print(
                     f"step {step:6d} | loss {loss_accum:.4f} | lr {lr:.2e} | {tok_per_sec:.0f} tok/s"
                 )
+                with open(log_path, "a") as f:
+                    f.write(json.dumps({
+                        "step": step, "loss": round(loss_accum, 4),
+                        "lr": lr, "tok_per_sec": round(tok_per_sec),
+                        "max_steps": args.max_steps,
+                    }) + "\n")
 
             if step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
