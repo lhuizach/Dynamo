@@ -10,6 +10,11 @@ from typing import Optional
 
 from datasets import load_dataset as _load_dataset  # noqa: F401 — must import before torch on Windows
 import torch
+try:
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+except Exception:
+    pass
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -96,10 +101,8 @@ def main(args: argparse.Namespace) -> None:
 
     if args.compile:
         try:
-            import torch._dynamo
-            torch._dynamo.config.suppress_errors = True
-            model = torch.compile(model, backend="eager")
-            print("torch.compile() enabled (eager backend)")
+            model = torch.compile(model)
+            print("torch.compile() enabled")
         except Exception as e:
             print(f"torch.compile() unavailable ({e}), skipping")
 
