@@ -5,7 +5,6 @@ from typing import Iterator, List, Optional, Tuple
 
 import torch
 from torch.utils.data import IterableDataset
-from datasets import load_dataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -26,6 +25,7 @@ class CodeDataset(IterableDataset):
         self.num_samples = num_samples
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
+        from datasets import load_dataset
         dataset = load_dataset("bigcode/the-stack-smol", streaming=True, split="train")
         buffer: List[int] = []
         count = 0

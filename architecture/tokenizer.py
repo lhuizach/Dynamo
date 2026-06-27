@@ -3,7 +3,6 @@ import os
 from typing import List
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
-from datasets import load_dataset
 
 
 def train_tokenizer(
@@ -11,6 +10,7 @@ def train_tokenizer(
     vocab_size: int = 16384,
     num_samples: int = 100_000,
 ) -> None:
+    from datasets import load_dataset
     tokenizer = Tokenizer(models.BPE(unk_token="<|unk|>"))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
 
