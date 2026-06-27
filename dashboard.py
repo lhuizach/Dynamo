@@ -346,5 +346,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=5001)
     args = p.parse_args()
+    import socket
+    local_ip = socket.gethostbyname(socket.gethostname())
     print(f"Dashboard → http://localhost:{args.port}")
-    app.run(port=args.port, debug=False)
+    print(f"On your phone → http://{local_ip}:{args.port}")
+    app.run(host="0.0.0.0", port=args.port, debug=False)
