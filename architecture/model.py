@@ -159,6 +159,7 @@ class Dynamo(nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_p: float = 0.9,
+        eos_id: Optional[int] = None,
     ) -> torch.Tensor:
         for _ in range(max_new_tokens):
             idx_cond = idx[:, -self.config.max_seq_len:]
@@ -175,6 +176,9 @@ class Dynamo(nn.Module):
             probs = F.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_token], dim=1)
+
+            if eos_id is not None and next_token.item() == eos_id:
+                break
 
         return idx
 
