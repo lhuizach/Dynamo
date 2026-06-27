@@ -160,7 +160,7 @@ input:checked+.slider:before{transform:translateX(16px);background:#fff}
     </div>
     <div class="field-row">
       <div class="field"><label>torch.compile</label>
-        <select id="cCompile"><option value="true" selected>On (+20-40% speed)</option><option value="false">Off</option></select>
+        <select id="cCompile"><option value="false" selected>Off (Triton unavailable on Windows)</option><option value="true">On (Linux/WSL only)</option></select>
       </div>
       <div class="field"><label>TF32</label><input value="enabled (auto)" disabled style="color:#484f58"></div>
     </div>

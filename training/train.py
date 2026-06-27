@@ -96,10 +96,12 @@ def main(args: argparse.Namespace) -> None:
 
     if args.compile:
         try:
-            model = torch.compile(model)
-            print("torch.compile() enabled")
+            import torch._dynamo
+            torch._dynamo.config.suppress_errors = True
+            model = torch.compile(model, backend="eager")
+            print("torch.compile() enabled (eager backend)")
         except Exception as e:
-            print(f"torch.compile() failed ({e}), continuing without it")
+            print(f"torch.compile() unavailable ({e}), skipping")
 
     if args.no_bnb:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
