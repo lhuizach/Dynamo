@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dynamo Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:16px;min-height:100vh}
+h1{font-size:18px;font-weight:700;color:#58a6ff;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:12px}
+.card h3{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px}
+.card .val{font-size:22px;font-weight:700;color:#e6edf3}
+.card .sub{font-size:11px;color:#484f58;margin-top:2px}
+.progress-bg{background:#21262d;border-radius:8px;height:8px;overflow:hidden;margin-bottom:6px}
+.progress-bar{background:linear-gradient(90deg,#1f6feb,#58a6ff);height:100%;border-radius:8px;transition:width .5s}
+.progress-label{display:flex;justify-content:space-between;font-size:11px;color:#8b949e;margin-bottom:16px}
+.chart-wrap{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:12px;height:220px;margin-bottom:16px}
+.input-section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px}
+.input-section h2{font-size:12px;color:#8b949e;text-transform:uppercase;margin-bottom:10px}
+input[type=text]{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px 10px;border-radius:6px;font-size:12px;outline:none;margin-bottom:10px}
+input:focus{border-color:#58a6ff}
+button{width:100%;padding:10px;border-radius:6px;border:none;cursor:pointer;font-size:14px;font-weight:600;background:#238636;color:#fff}
+.status{font-size:11px;color:#484f58;margin-top:8px;text-align:center}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge.live{background:#1f6a1f;color:#3fb950;border:1px solid #3fb95055}
+.badge.off{background:#21262d;color:#8b949e;border:1px solid #30363d}
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ Dynamo</h1>
+  <span class="badge off" id="badge">Offline</span>
+</header>
+
+<div class="grid">
+  <div class="card"><h3>Step</h3><div class="val" id="sStep">—</div><div class="sub" id="sMax"></div></div>
+  <div class="card"><h3>Loss</h3><div class="val" id="sLoss">—</div></div>
+  <div class="card"><h3>LR</h3><div class="val" id="sLr">—</div></div>
+  <div class="card"><h3>Tok/s</h3><div class="val" id="sTok">—</div></div>
+</div>
+
+<div class="progress-bg"><div class="progress-bar" id="bar" style="width:0%"></div></div>
+<div class="progress-label"><span id="pct">0%</span><span id="eta">—</span></div>
+
+<div class="chart-wrap"><canvas id="chart"></canvas></div>
+
+<div class="input-section">
+  <h2>Gist URL</h2>
+  <input type="text" id="url" placeholder="https://gist.githubusercontent.com/user/id/raw/training_log.jsonl">
+  <button onclick="connect()">Connect</button>
+  <div class="status" id="status">Paste your raw Gist URL above</div>
+</div>
+
+<script>
+const ctx = document.getElementById('chart').getContext('2d');
+const chart = new Chart(ctx, {
+  type:'line',
+  data:{labels:[],datasets:[{label:'Loss',data:[],borderColor:'#58a6ff',backgroundColor:'#58a6ff22',borderWidth:2,pointRadius:0,fill:true,tension:0.3}]},
+  options:{responsive:true,maintainAspectRatio:false,animation:false,
+    plugins:{legend:{display:false}},
+    scales:{x:{ticks:{color:'#484f58',maxTicksLimit:6},grid:{color:'#21262d'}},
+            y:{ticks:{color:'#484f58'},grid:{color:'#21262d'}}}}
+});
+
+let interval = null;
+let t0 = Date.now();
+let lastStep = 0;
+
+function connect() {
+  const url = document.getElementById('url').value.trim();
+  if (!url) return;
+  localStorage.setItem('dynamo_gist_url', url);
+  if (interval) clearInterval(interval);
+  t0 = Date.now();
+  fetch_metrics(url);
+  interval = setInterval(() => fetch_metrics(url), 5000);
+}
+
+async function fetch_metrics(url) {
+  try {
+    const r = await fetch(url + '?t=' + Date.now());
+    const text = await r.text();
+    const rows = text.trim().split('\n').filter(l=>l).map(l=>JSON.parse(l));
+    if (!rows.length) return;
+    const last = rows[rows.length-1];
+
+    document.getElementById('sStep').textContent = last.step.toLocaleString();
+    document.getElementById('sMax').textContent = '/ ' + last.max_steps.toLocaleString();
+    document.getElementById('sLoss').textContent = last.loss.toFixed(4);
+    document.getElementById('sLr').textContent = last.lr.toExponential(1);
+    document.getElementById('sTok').textContent = last.tok_per_sec.toLocaleString();
+
+    const pct = (last.step / last.max_steps * 100).toFixed(1);
+    document.getElementById('bar').style.width = pct + '%';
+    document.getElementById('pct').textContent = pct + '%';
+
+    const elapsed = (Date.now() - t0) / 1000;
+    const stepsSince = last.step - lastStep;
+    if (stepsSince > 0 && elapsed > 0) {
+      const sps = stepsSince / elapsed;
+      const remaining = (last.max_steps - last.step) / sps;
+      document.getElementById('eta').textContent = 'ETA ' + fmt(remaining);
+    }
+
+    const sample = rows.filter((_,i)=>i%Math.max(1,Math.floor(rows.length/150))===0);
+    chart.data.labels = sample.map(m=>m.step);
+    chart.data.datasets[0].data = sample.map(m=>m.loss);
+    chart.update();
+
+    document.getElementById('badge').textContent = 'Live';
+    document.getElementById('badge').className = 'badge live';
+    document.getElementById('status').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('badge').textContent = 'Offline';
+    document.getElementById('badge').className = 'badge off';
+    document.getElementById('status').textContent = 'Error: ' + e.message;
+  }
+}
+
+function fmt(sec) {
+  if (sec < 60) return Math.round(sec) + 's';
+  if (sec < 3600) return Math.round(sec/60) + 'm';
+  return Math.floor(sec/3600) + 'h ' + Math.round((sec%3600)/60) + 'm';
+}
+
+// restore saved URL
+const saved = localStorage.getItem('dynamo_gist_url');
+if (saved) { document.getElementById('url').value = saved; connect(); }
+</script>
+</body>
+</html>
