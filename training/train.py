@@ -182,6 +182,10 @@ def main(args: argparse.Namespace) -> None:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
                 state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
                 torch.save({"step": step, "model": state, "config": config}, ckpt)
+                # keep only the 2 most recent checkpoints to save disk space
+                old = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))[:-2]
+                for f in old:
+                    os.remove(f)
 
             loss_accum = 0.0
             step += 1
