@@ -97,10 +97,6 @@ def main(args: argparse.Namespace) -> None:
     for block in model.layers:
         block.use_checkpoint = True
 
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs")
-        model = torch.nn.DataParallel(model)
-
     step = 0
     if args.resume:
         candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
@@ -112,6 +108,10 @@ def main(args: argparse.Namespace) -> None:
             print(f"Resumed from {ckpt_path} (step {step})")
         else:
             print("No checkpoint found — starting from scratch")
+
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
 
     if args.no_bnb:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
