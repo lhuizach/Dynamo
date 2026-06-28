@@ -1,0 +1,1 @@
+{"user_request": "<vague natural-language coding request>", "precise_instruction": "<single precise technical instruction a code model can follow>", "code": "<complete, immediately executable code implementing the instruction>"}
