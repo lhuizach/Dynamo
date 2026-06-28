@@ -81,7 +81,6 @@ def main(args: argparse.Namespace) -> None:
     if device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
 
     tokenizer = DynamoTokenizer(args.tokenizer)
     config = ModelConfig(
@@ -123,12 +122,7 @@ def main(args: argparse.Namespace) -> None:
     scaler = torch.amp.GradScaler(device, enabled=(device == "cuda" and not use_bf16))
 
     dataset = CodeDataset(tokenizer, args.seq_len, args.languages)
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        num_workers=0,
-        pin_memory=(device == "cuda"),
-    )
+    loader = DataLoader(dataset, batch_size=args.batch_size)
 
     log_path = os.path.join(args.output, "training_log.jsonl")
     if not args.resume:
@@ -141,7 +135,7 @@ def main(args: argparse.Namespace) -> None:
     optimizer.zero_grad()
 
     for x, y in loader:
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        x, y = x.to(device), y.to(device)
 
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
             _, loss = model(x, y)
