@@ -126,7 +126,6 @@ def main(args: argparse.Namespace) -> None:
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
         num_workers=4,
         pin_memory=(device == "cuda"),
         persistent_workers=True,
