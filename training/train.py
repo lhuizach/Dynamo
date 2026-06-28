@@ -126,9 +126,8 @@ def main(args: argparse.Namespace) -> None:
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=0,
         pin_memory=(device == "cuda"),
-        persistent_workers=True,
     )
 
     log_path = os.path.join(args.output, "training_log.jsonl")
