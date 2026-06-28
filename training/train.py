@@ -4,7 +4,9 @@ import glob
 import json
 import math
 import os
+import shutil
 import sys
+import threading
 import time
 import urllib.request
 from typing import Optional
@@ -31,6 +33,66 @@ def _push_gist(gist_id: str, token: str, content: str) -> None:
         urllib.request.urlopen(req, timeout=5)
     except Exception:
         pass
+
+
+def _hf_upload_checkpoint(repo_id: str, token: str, local_path: str) -> threading.Thread:
+    """Upload a checkpoint to HF Hub in a background thread. Returns the thread."""
+    def _do_upload() -> None:
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=token)
+            fname = os.path.basename(local_path)
+            api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True, token=token)
+            api.upload_file(
+                path_or_fileobj=local_path,
+                path_in_repo=f"checkpoints/{fname}",
+                repo_id=repo_id,
+                repo_type="model",
+                token=token,
+            )
+            print(f"[HF Hub] Uploaded {fname} → {repo_id}")
+        except Exception as e:
+            print(f"[HF Hub] Upload failed: {e}")
+
+    t = threading.Thread(target=_do_upload, daemon=True)
+    t.start()
+    return t
+
+
+def _hf_download_latest_checkpoint(repo_id: str, token: str, output_dir: str) -> Optional[str]:
+    """Download the latest checkpoint from HF Hub. Returns local path or None."""
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+        api = HfApi(token=token)
+        all_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", token=token))
+        ckpt_files = sorted(
+            f for f in all_files
+            if f.startswith("checkpoints/checkpoint_") and f.endswith(".pt")
+        )
+        if not ckpt_files:
+            print(f"[HF Hub] No checkpoints found in {repo_id}")
+            return None
+        latest = ckpt_files[-1]
+        print(f"[HF Hub] Downloading {latest} from {repo_id} ...")
+        dl_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=latest,
+            repo_type="model",
+            token=token,
+            local_dir=output_dir,
+        )
+        # hf_hub_download nests the file under output_dir/checkpoints/ — move it up one level
+        dest = os.path.join(output_dir, os.path.basename(latest))
+        if os.path.abspath(dl_path) != os.path.abspath(dest):
+            shutil.move(dl_path, dest)
+            subdir = os.path.join(output_dir, "checkpoints")
+            if os.path.isdir(subdir) and not os.listdir(subdir):
+                os.rmdir(subdir)
+        print(f"[HF Hub] Saved to {dest}")
+        return dest
+    except Exception as e:
+        print(f"[HF Hub] Download failed: {e}")
+        return None
 
 
 def cosine_lr(
@@ -68,7 +130,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--languages", nargs="*", default=None)
     p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
-    p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint in output dir")
+    p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint (local or HF Hub)")
+    p.add_argument("--hf-repo", default=None, help="HuggingFace Hub repo for persistent checkpoint storage (e.g. username/dynamo-checkpoints)")
+    p.add_argument("--hf-save-every", type=int, default=None, help="Upload to HF Hub every N steps (default: same as --save-every)")
     p.add_argument("--gist-id", default=None, help="GitHub Gist ID to stream metrics to (for remote monitoring)")
     p.add_argument("--github-token", default=None, help="GitHub token with gist write permission")
     return p.parse_args()
@@ -81,6 +145,9 @@ def main(args: argparse.Namespace) -> None:
     if device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    hf_save_every = args.hf_save_every if args.hf_save_every is not None else args.save_every
 
     tokenizer = DynamoTokenizer(args.tokenizer)
     config = ModelConfig(
@@ -101,7 +168,14 @@ def main(args: argparse.Namespace) -> None:
     if args.resume:
         candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
         if candidates:
-            ckpt_path = candidates[-1]
+            ckpt_path: Optional[str] = candidates[-1]
+            print(f"Found local checkpoint: {ckpt_path}")
+        elif args.hf_repo and hf_token:
+            ckpt_path = _hf_download_latest_checkpoint(args.hf_repo, hf_token, args.output)
+        else:
+            ckpt_path = None
+
+        if ckpt_path:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             model.load_state_dict(ckpt["model"])
             step = ckpt["step"]
@@ -137,6 +211,8 @@ def main(args: argparse.Namespace) -> None:
     loss_accum = 0.0
     t0 = time.time()
     optimizer.zero_grad()
+
+    upload_thread: Optional[threading.Thread] = None
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
@@ -182,20 +258,40 @@ def main(args: argparse.Namespace) -> None:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
                 state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
                 torch.save({"step": step, "model": state, "config": config}, ckpt)
+
+                # Wait for any in-flight HF upload before removing old local files
+                if upload_thread and upload_thread.is_alive():
+                    print("[HF Hub] Waiting for previous upload to finish...")
+                    upload_thread.join()
+
                 # keep only the 2 most recent checkpoints to save disk space
                 old = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))[:-2]
                 for f in old:
                     os.remove(f)
+
+                # Push to HF Hub for cross-session persistence
+                if args.hf_repo and hf_token and step % hf_save_every == 0:
+                    upload_thread = _hf_upload_checkpoint(args.hf_repo, hf_token, ckpt)
 
             loss_accum = 0.0
             step += 1
             if step >= args.max_steps:
                 break
 
+    # Ensure final HF upload completes before exit
+    if upload_thread and upload_thread.is_alive():
+        print("[HF Hub] Waiting for final upload to finish...")
+        upload_thread.join()
+
     final = os.path.join(args.output, "checkpoint_final.pt")
     state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
     torch.save({"step": step, "model": state, "config": config}, final)
     print(f"Saved final checkpoint → {final}")
+
+    if args.hf_repo and hf_token:
+        print("[HF Hub] Uploading final checkpoint ...")
+        t = _hf_upload_checkpoint(args.hf_repo, hf_token, final)
+        t.join()
 
 
 if __name__ == "__main__":
