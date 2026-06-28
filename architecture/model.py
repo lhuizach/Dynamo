@@ -29,24 +29,26 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> Tuple[torch.Tensor, torch.Tensor]:
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
     t = torch.arange(end)
-    freqs = torch.outer(t, freqs)
-    return torch.polar(torch.ones_like(freqs), freqs)
+    freqs = torch.outer(t, freqs)  # (end, dim/2)
+    return torch.cos(freqs), torch.sin(freqs)
 
 
 def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    # freqs_cis: (T, head_dim/2) complex
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.unsqueeze(0).unsqueeze(2)  # (1, T, 1, head_dim/2)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    # cos, sin: (T, head_dim/2) — real arithmetic, fully compilable
+    cos = cos.unsqueeze(0).unsqueeze(2)  # (1, T, 1, head_dim/2)
+    sin = sin.unsqueeze(0).unsqueeze(2)
+    xq1, xq2 = xq[..., ::2], xq[..., 1::2]
+    xk1, xk2 = xk[..., ::2], xk[..., 1::2]
+    xq_out = torch.stack([xq1 * cos - xq2 * sin, xq1 * sin + xq2 * cos], dim=-1).flatten(3)
+    xk_out = torch.stack([xk1 * cos - xk2 * sin, xk1 * sin + xk2 * cos], dim=-1).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
@@ -63,13 +65,13 @@ class Attention(nn.Module):
         self.wv = nn.Linear(config.dim, config.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         B, T, _ = x.shape
         xq = self.wq(x).view(B, T, self.n_heads, self.head_dim)
         xk = self.wk(x).view(B, T, self.n_kv_heads, self.head_dim)
         xv = self.wv(x).view(B, T, self.n_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, cos, sin)
 
         xk = xk.repeat_interleave(self.n_rep, dim=2)
         xv = xv.repeat_interleave(self.n_rep, dim=2)
@@ -103,17 +105,17 @@ class TransformerBlock(nn.Module):
         self.ffn = FeedForward(config)
         self.use_checkpoint = False
 
-    def _inner(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x), freqs_cis)
+    def _inner(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(self.attn_norm(x), cos, sin)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         if self.use_checkpoint:
             return torch.utils.checkpoint.checkpoint(
-                self._inner, x, freqs_cis, use_reentrant=False
+                self._inner, x, cos, sin, use_reentrant=False
             )
-        return self._inner(x, freqs_cis)
+        return self._inner(x, cos, sin)
 
 
 class Dynamo(nn.Module):
@@ -126,10 +128,9 @@ class Dynamo(nn.Module):
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
         self.lm_head.weight = self.embed_tokens.weight  # weight tying
 
-        self.register_buffer(
-            "freqs_cis",
-            precompute_freqs_cis(config.dim // config.n_heads, config.max_seq_len * 2),
-        )
+        cos, sin = precompute_freqs_cis(config.dim // config.n_heads, config.max_seq_len * 2)
+        self.register_buffer("rope_cos", cos)
+        self.register_buffer("rope_sin", sin)
 
     def forward(
         self,
@@ -138,10 +139,11 @@ class Dynamo(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         B, T = tokens.shape
         x = self.embed_tokens(tokens)
-        freqs_cis = self.freqs_cis[:T]
+        cos = self.rope_cos[:T]
+        sin = self.rope_sin[:T]
 
         for layer in self.layers:
-            x = layer(x, freqs_cis)
+            x = layer(x, cos, sin)
 
         x = self.norm(x)
         logits = self.lm_head(x)
