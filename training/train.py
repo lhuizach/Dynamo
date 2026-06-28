@@ -143,7 +143,7 @@ def main(args: argparse.Namespace) -> None:
 
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
             _, loss = model(x, y)
-            loss = loss / args.grad_accum
+            loss = loss.mean() / args.grad_accum
 
         scaler.scale(loss).backward()
         loss_accum += loss.item()
