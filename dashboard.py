@@ -183,6 +183,28 @@ input:checked+.slider:before{transform:translateX(16px);background:#fff}
   </div>
 </div>
 
+<!-- Remote Monitor -->
+<div class="section">
+  <h2>Remote Monitor (Kaggle)</h2>
+</div>
+<div class="two-col" style="margin-top:-12px;padding:0 24px 20px">
+  <div class="panel">
+    <h2>Gist URL</h2>
+    <div class="field">
+      <label>Raw Gist URL</label>
+      <input id="gistUrl" placeholder="https://gist.githubusercontent.com/user/id/raw/training_log.jsonl" style="font-size:11px">
+    </div>
+    <div class="btn-row">
+      <button class="btn-start" onclick="startRemote()">▶ Connect</button>
+      <button class="btn-stop" onclick="stopRemote()">■ Disconnect</button>
+    </div>
+    <div style="font-size:12px;color:#484f58;margin-top:8px" id="remoteStatus">Not connected</div>
+  </div>
+  <div class="panel" style="display:flex;align-items:center;justify-content:center;color:#484f58;font-size:13px;text-align:center">
+    Paste the raw Gist URL to stream live metrics from Kaggle into this dashboard.
+  </div>
+</div>
+
 <!-- Scheduler -->
 <div class="section">
   <h2>Scheduler</h2>
@@ -347,6 +369,47 @@ async function toggleScheduler() {
   const enabled = document.getElementById('schedEnabled').checked;
   document.getElementById('schedLabel').textContent = enabled ? 'Scheduler enabled' : 'Scheduler disabled';
   await fetch('/schedules/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled})});
+}
+
+let remoteInterval = null;
+
+function startRemote() {
+  const url = document.getElementById('gistUrl').value.trim();
+  if (!url) return;
+  document.getElementById('remoteStatus').textContent = 'Connecting...';
+  if (remoteInterval) clearInterval(remoteInterval);
+  remoteInterval = setInterval(() => fetchRemote(url), 5000);
+  fetchRemote(url);
+}
+
+function stopRemote() {
+  if (remoteInterval) { clearInterval(remoteInterval); remoteInterval = null; }
+  document.getElementById('remoteStatus').textContent = 'Disconnected';
+}
+
+async function fetchRemote(url) {
+  try {
+    const resp = await fetch(url + '?t=' + Date.now());
+    const text = await resp.text();
+    const rows = text.trim().split('\n').filter(l=>l).map(l=>JSON.parse(l));
+    if (rows.length === 0) return;
+    const last = rows[rows.length-1];
+    document.getElementById('statStep').textContent = last.step.toLocaleString();
+    document.getElementById('statLoss').textContent = last.loss.toFixed(4);
+    document.getElementById('statLr').textContent = last.lr.toExponential(1);
+    document.getElementById('statTok').textContent = last.tok_per_sec.toLocaleString();
+    document.getElementById('statMaxSteps').textContent = '/ '+last.max_steps.toLocaleString();
+    const pct = (last.step/last.max_steps*100).toFixed(1);
+    document.getElementById('progressBar').style.width = pct+'%';
+    document.getElementById('progressPct').textContent = pct+'%';
+    const sample = rows.filter((_,i)=>i%Math.max(1,Math.floor(rows.length/200))===0);
+    chart.data.labels = sample.map(m=>m.step);
+    chart.data.datasets[0].data = sample.map(m=>m.loss);
+    chart.update();
+    document.getElementById('remoteStatus').textContent = 'Live — last update ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('remoteStatus').textContent = 'Error: ' + e.message;
+  }
 }
 
 function onBackendChange(val) {

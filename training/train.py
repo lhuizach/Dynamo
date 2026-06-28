@@ -6,15 +6,11 @@ import math
 import os
 import sys
 import time
+import urllib.request
 from typing import Optional
 
 from datasets import load_dataset as _load_dataset  # noqa: F401 — must import before torch on Windows
 import torch
-try:
-    import torch._dynamo
-    torch._dynamo.config.suppress_errors = True
-except Exception:
-    pass
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from architecture.model import Dynamo, ModelConfig
 from architecture.tokenizer import DynamoTokenizer
 from training.data import CodeDataset
+
+
+def _push_gist(gist_id: str, token: str, content: str) -> None:
+    try:
+        data = json.dumps({"files": {"training_log.jsonl": {"content": content}}}).encode()
+        req = urllib.request.Request(
+            f"https://api.github.com/gists/{gist_id}",
+            data=data, method="PATCH",
+            headers={"Authorization": f"token {token}", "Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
 
 
 def cosine_lr(
@@ -60,7 +69,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--languages", nargs="*", default=None)
     p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
     p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint in output dir")
-    p.add_argument("--compile", action="store_true", help="Apply torch.compile() for ~20-40%% speedup (may not work on all setups)")
+    p.add_argument("--gist-id", default=None, help="GitHub Gist ID to stream metrics to (for remote monitoring)")
+    p.add_argument("--github-token", default=None, help="GitHub token with gist write permission")
     return p.parse_args()
 
 
@@ -71,6 +81,7 @@ def main(args: argparse.Namespace) -> None:
     if device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
     tokenizer = DynamoTokenizer(args.tokenizer)
     config = ModelConfig(
@@ -99,13 +110,6 @@ def main(args: argparse.Namespace) -> None:
         else:
             print("No checkpoint found — starting from scratch")
 
-    if args.compile:
-        try:
-            model = torch.compile(model)
-            print("torch.compile() enabled")
-        except Exception as e:
-            print(f"torch.compile() unavailable ({e}), skipping")
-
     if args.no_bnb:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.max_lr, betas=(0.9, 0.95))
         print("Using AdamW (--no-bnb)")
@@ -119,7 +123,14 @@ def main(args: argparse.Namespace) -> None:
     scaler = torch.amp.GradScaler(device, enabled=(device == "cuda" and not use_bf16))
 
     dataset = CodeDataset(tokenizer, args.seq_len, args.languages)
-    loader = DataLoader(dataset, batch_size=args.batch_size)
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=(device == "cuda"),
+        persistent_workers=True,
+    )
 
     log_path = os.path.join(args.output, "training_log.jsonl")
     if not args.resume:
@@ -132,7 +143,7 @@ def main(args: argparse.Namespace) -> None:
     optimizer.zero_grad()
 
     for x, y in loader:
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
 
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
             _, loss = model(x, y)
@@ -160,12 +171,16 @@ def main(args: argparse.Namespace) -> None:
                 print(
                     f"step {step:6d} | loss {loss_accum:.4f} | lr {lr:.2e} | {tok_per_sec:.0f} tok/s"
                 )
+                entry = json.dumps({
+                    "step": step, "loss": round(loss_accum, 4),
+                    "lr": lr, "tok_per_sec": round(tok_per_sec),
+                    "max_steps": args.max_steps,
+                })
                 with open(log_path, "a") as f:
-                    f.write(json.dumps({
-                        "step": step, "loss": round(loss_accum, 4),
-                        "lr": lr, "tok_per_sec": round(tok_per_sec),
-                        "max_steps": args.max_steps,
-                    }) + "\n")
+                    f.write(entry + "\n")
+                if args.gist_id and args.github_token:
+                    with open(log_path) as f:
+                        _push_gist(args.gist_id, args.github_token, f.read())
 
             if step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
