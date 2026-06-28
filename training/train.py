@@ -97,6 +97,10 @@ def main(args: argparse.Namespace) -> None:
     for block in model.layers:
         block.use_checkpoint = True
 
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
+
     step = 0
     if args.resume:
         candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
@@ -176,7 +180,8 @@ def main(args: argparse.Namespace) -> None:
 
             if step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
-                torch.save({"step": step, "model": model.state_dict(), "config": config}, ckpt)
+                state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
+                torch.save({"step": step, "model": state, "config": config}, ckpt)
 
             loss_accum = 0.0
             step += 1
@@ -184,7 +189,8 @@ def main(args: argparse.Namespace) -> None:
                 break
 
     final = os.path.join(args.output, "checkpoint_final.pt")
-    torch.save({"step": step, "model": model.state_dict(), "config": config}, final)
+    state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
+    torch.save({"step": step, "model": state, "config": config}, final)
     print(f"Saved final checkpoint → {final}")
 
 
