@@ -63,8 +63,13 @@ def _hf_download_latest_checkpoint(repo_id: str, token: str, output_dir: str) ->
     """Download the latest checkpoint from HF Hub. Returns local path or None."""
     try:
         from huggingface_hub import HfApi, hf_hub_download
+        from huggingface_hub.utils import RepositoryNotFoundError
         api = HfApi(token=token)
-        all_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", token=token))
+        try:
+            all_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", token=token))
+        except RepositoryNotFoundError:
+            print(f"[HF Hub] Repo {repo_id!r} not found — will be created on first checkpoint save")
+            return None
         ckpt_files = sorted(
             f for f in all_files
             if f.startswith("checkpoints/checkpoint_") and f.endswith(".pt")
