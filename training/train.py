@@ -51,6 +51,15 @@ def _hf_upload_checkpoint(repo_id: str, token: str, local_path: str) -> threadin
                 token=token,
             )
             print(f"[HF Hub] Uploaded {fname} → {repo_id}")
+            # prune old HF checkpoints — keep only 2 most recent
+            all_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", token=token))
+            old_ckpts = sorted(
+                f for f in all_files
+                if f.startswith("checkpoints/checkpoint_") and f.endswith(".pt")
+            )[:-2]
+            for old in old_ckpts:
+                api.delete_file(path_in_repo=old, repo_id=repo_id, repo_type="model", token=token)
+                print(f"[HF Hub] Deleted old checkpoint {old}")
         except Exception as e:
             print(f"[HF Hub] Upload failed: {e}")
 
