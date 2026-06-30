@@ -235,6 +235,11 @@ def main(args: argparse.Namespace) -> None:
             _, loss = model(x, y)
             loss = loss.mean() / args.grad_accum
 
+        if not torch.isfinite(loss):
+            print(f"WARNING: non-finite loss at micro_step {micro_step} — skipping batch")
+            optimizer.zero_grad()
+            continue
+
         scaler.scale(loss).backward()
         loss_accum += loss.item()
         micro_step += 1
