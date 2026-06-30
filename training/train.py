@@ -68,8 +68,11 @@ def _hf_upload_checkpoint(repo_id: str, token: str, local_path: str) -> threadin
     return t
 
 
-def _hf_download_latest_checkpoint(repo_id: str, token: str, output_dir: str) -> Optional[str]:
-    """Download the latest checkpoint from HF Hub. Returns local path or None."""
+def _hf_download_latest_checkpoint(
+    repo_id: str, token: str, output_dir: str, resume_step: Optional[int] = None,
+) -> Optional[str]:
+    """Download a checkpoint from HF Hub. If resume_step is given, fetch that exact
+    step; otherwise fetch the latest. Returns local path or None."""
     try:
         from huggingface_hub import HfApi, hf_hub_download
         from huggingface_hub.utils import RepositoryNotFoundError
@@ -86,7 +89,14 @@ def _hf_download_latest_checkpoint(repo_id: str, token: str, output_dir: str) ->
         if not ckpt_files:
             print(f"[HF Hub] No checkpoints found in {repo_id}")
             return None
-        latest = ckpt_files[-1]
+        if resume_step is not None:
+            wanted = f"checkpoints/checkpoint_{resume_step:06d}.pt"
+            if wanted not in ckpt_files:
+                print(f"[HF Hub] {wanted} not found in {repo_id}. Available: {ckpt_files}")
+                return None
+            latest = wanted
+        else:
+            latest = ckpt_files[-1]
         print(f"[HF Hub] Downloading {latest} from {repo_id} ...")
         dl_path = hf_hub_download(
             repo_id=repo_id,
@@ -145,6 +155,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--languages", nargs="*", default=None)
     p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
     p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint (local or HF Hub)")
+    p.add_argument("--resume-step", type=int, default=None, help="Resume from this exact step instead of the latest checkpoint (use to roll back past a corrupted save)")
     p.add_argument("--hf-repo", default=None, help="HuggingFace Hub repo for persistent checkpoint storage (e.g. username/dynamo-checkpoints)")
     p.add_argument("--hf-save-every", type=int, default=None, help="Upload to HF Hub every N steps (default: same as --save-every)")
     p.add_argument("--gist-id", default=None, help="GitHub Gist ID to stream metrics to (for remote monitoring)")
@@ -180,17 +191,37 @@ def main(args: argparse.Namespace) -> None:
 
     step = 0
     if args.resume:
-        candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
-        if candidates:
-            ckpt_path: Optional[str] = candidates[-1]
-            print(f"Found local checkpoint: {ckpt_path}")
-        elif args.hf_repo and hf_token:
-            ckpt_path = _hf_download_latest_checkpoint(args.hf_repo, hf_token, args.output)
+        if args.resume_step is not None:
+            wanted = os.path.join(args.output, f"checkpoint_{args.resume_step:06d}.pt")
+            ckpt_path: Optional[str] = wanted if os.path.exists(wanted) else None
+            if ckpt_path:
+                print(f"Found local checkpoint: {ckpt_path}")
+            elif args.hf_repo and hf_token:
+                ckpt_path = _hf_download_latest_checkpoint(
+                    args.hf_repo, hf_token, args.output, resume_step=args.resume_step
+                )
         else:
-            ckpt_path = None
+            candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
+            if candidates:
+                ckpt_path = candidates[-1]
+                print(f"Found local checkpoint: {ckpt_path}")
+            elif args.hf_repo and hf_token:
+                ckpt_path = _hf_download_latest_checkpoint(args.hf_repo, hf_token, args.output)
+            else:
+                ckpt_path = None
 
         if ckpt_path:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            bad_tensors = [
+                name for name, t in ckpt["model"].items()
+                if torch.is_floating_point(t) and not torch.isfinite(t).all()
+            ]
+            if bad_tensors:
+                raise RuntimeError(
+                    f"Checkpoint {ckpt_path} contains NaN/Inf in {len(bad_tensors)} tensor(s) "
+                    f"(e.g. {bad_tensors[0]}) — this checkpoint is corrupted. "
+                    f"Re-run with --resume-step set to an earlier saved step."
+                )
             model.load_state_dict(ckpt["model"])
             step = ckpt["step"]
             print(f"Resumed from {ckpt_path} (step {step})")
@@ -227,6 +258,8 @@ def main(args: argparse.Namespace) -> None:
     optimizer.zero_grad()
 
     upload_thread: Optional[threading.Thread] = None
+    consecutive_nonfinite = 0
+    MAX_CONSECUTIVE_NONFINITE = 20
 
     for x, y in loader:
         x, y = x.to(device), y.to(device)
@@ -236,9 +269,17 @@ def main(args: argparse.Namespace) -> None:
             loss = loss.mean() / args.grad_accum
 
         if not torch.isfinite(loss):
-            print(f"WARNING: non-finite loss at micro_step {micro_step} — skipping batch")
+            consecutive_nonfinite += 1
+            print(f"WARNING: non-finite loss at step {step} (micro_step {micro_step}) — skipping batch [{consecutive_nonfinite}/{MAX_CONSECUTIVE_NONFINITE}]")
             optimizer.zero_grad()
+            if consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE:
+                raise RuntimeError(
+                    f"{MAX_CONSECUTIVE_NONFINITE} consecutive non-finite losses at step {step} — "
+                    f"the model weights are corrupted, not the data. Stop and re-run with "
+                    f"--resume-step set to a checkpoint saved before this point."
+                )
             continue
+        consecutive_nonfinite = 0
 
         scaler.scale(loss).backward()
         loss_accum += loss.item()
