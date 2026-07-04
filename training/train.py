@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import deque
 from typing import Optional
 
 from datasets import load_dataset as _load_dataset  # noqa: F401 — must import before torch on Windows
@@ -298,6 +299,9 @@ def main(args: argparse.Namespace) -> None:
     upload_thread: Optional[threading.Thread] = None
     consecutive_nonfinite = 0
     MAX_CONSECUTIVE_NONFINITE = 20
+    NONFINITE_WINDOW = 200
+    NONFINITE_RATE_THRESHOLD = 0.15
+    nonfinite_window: deque = deque(maxlen=NONFINITE_WINDOW)
 
     for x, y in data_iter:
         x, y = x.to(device), y.to(device)
@@ -306,7 +310,19 @@ def main(args: argparse.Namespace) -> None:
             _, loss = model(x, y)
             loss = loss.mean() / args.grad_accum
 
-        if not torch.isfinite(loss):
+        is_finite = torch.isfinite(loss)
+        nonfinite_window.append(0 if is_finite else 1)
+        if len(nonfinite_window) == NONFINITE_WINDOW:
+            rate = sum(nonfinite_window) / NONFINITE_WINDOW
+            if rate > NONFINITE_RATE_THRESHOLD:
+                raise RuntimeError(
+                    f"{rate:.0%} of the last {NONFINITE_WINDOW} micro-steps produced a non-finite "
+                    f"loss at step {step} — the model is gradually diverging even without a single "
+                    f"unbroken failure streak. Stop and re-run with --resume-step set to an earlier "
+                    f"checkpoint (or restart from scratch)."
+                )
+
+        if not is_finite:
             consecutive_nonfinite += 1
             print(f"WARNING: non-finite loss at step {step} (micro_step {micro_step}) — skipping batch [{consecutive_nonfinite}/{MAX_CONSECUTIVE_NONFINITE}]")
             optimizer.zero_grad()
@@ -357,6 +373,15 @@ def main(args: argparse.Namespace) -> None:
                 state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
                 torch.save({"step": step, "model": state, "config": config}, ckpt)
 
+                ckpt_is_healthy = all(
+                    torch.isfinite(t).all() for t in state.values() if torch.is_floating_point(t)
+                )
+                if not ckpt_is_healthy:
+                    print(
+                        f"WARNING: checkpoint at step {step} contains NaN/Inf — NOT uploading to "
+                        f"HF Hub to avoid poisoning the persisted checkpoint history."
+                    )
+
                 # Wait for any in-flight HF upload before removing old local files
                 if upload_thread and upload_thread.is_alive():
                     print("[HF Hub] Waiting for previous upload to finish...")
@@ -368,7 +393,7 @@ def main(args: argparse.Namespace) -> None:
                     os.remove(f)
 
                 # Push to HF Hub for cross-session persistence
-                if args.hf_repo and hf_token and step % hf_save_every == 0:
+                if args.hf_repo and hf_token and step % hf_save_every == 0 and ckpt_is_healthy:
                     upload_thread = _hf_upload_checkpoint(args.hf_repo, hf_token, ckpt)
 
             loss_accum = 0.0

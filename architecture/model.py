@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -130,11 +131,24 @@ class Dynamo(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.norm = RMSNorm(config.dim, config.norm_eps)
         self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+
+        self.apply(self._init_weights)
+        # scale down residual-stream output projections so activations don't grow
+        # unboundedly across layers (same convention as GPT-2) — keeps fp16 training
+        # further from its overflow ceiling
+        for name, p in self.named_parameters():
+            if name.endswith("wo.weight") or name.endswith("down.weight"):
+                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layers))
+
         self.lm_head.weight = self.embed_tokens.weight  # weight tying
 
         cos, sin = precompute_freqs_cis(config.dim // config.n_heads, config.max_seq_len * 2)
         self.register_buffer("rope_cos", cos)
         self.register_buffer("rope_sin", sin)
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
         self,
