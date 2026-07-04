@@ -164,6 +164,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
+    print(f"Config: {vars(args)}")
     os.makedirs(args.output, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
