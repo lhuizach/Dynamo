@@ -190,6 +190,7 @@ def main(args: argparse.Namespace) -> None:
         block.use_checkpoint = True
 
     step = 0
+    resumed_from_checkpoint = False
     if args.resume:
         if args.resume_step is not None:
             wanted = os.path.join(args.output, f"checkpoint_{args.resume_step:06d}.pt")
@@ -224,6 +225,7 @@ def main(args: argparse.Namespace) -> None:
                 )
             model.load_state_dict(ckpt["model"])
             step = ckpt["step"]
+            resumed_from_checkpoint = True
             print(f"Resumed from {ckpt_path} (step {step})")
         else:
             print("No checkpoint found — starting from scratch")
@@ -246,10 +248,31 @@ def main(args: argparse.Namespace) -> None:
 
     dataset = CodeDataset(tokenizer, args.seq_len, args.languages)
     loader = DataLoader(dataset, batch_size=args.batch_size)
+    data_iter = iter(loader)
 
     log_path = os.path.join(args.output, "training_log.jsonl")
     if not args.resume:
         open(log_path, "w").close()  # reset log on fresh run
+
+    if resumed_from_checkpoint:
+        print("Validating resumed checkpoint against live data before training...")
+        model.eval()
+        with torch.no_grad():
+            for check_i in range(5):
+                x, y = next(data_iter)
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                    _, health_loss = model(x, y)
+                    health_loss = health_loss.mean()
+                if not torch.isfinite(health_loss):
+                    raise RuntimeError(
+                        f"Resumed checkpoint {ckpt_path} produces non-finite loss on live data "
+                        f"(check {check_i + 1}/5) — its weights are individually finite but the "
+                        f"model itself is corrupted/unstable. Re-run with --resume-step set to an "
+                        f"earlier checkpoint."
+                    )
+        model.train()
+        print("Checkpoint looks healthy — starting training.")
 
     micro_step = step * args.grad_accum
     tokens_seen = 0
@@ -261,7 +284,7 @@ def main(args: argparse.Namespace) -> None:
     consecutive_nonfinite = 0
     MAX_CONSECUTIVE_NONFINITE = 20
 
-    for x, y in loader:
+    for x, y in data_iter:
         x, y = x.to(device), y.to(device)
 
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
