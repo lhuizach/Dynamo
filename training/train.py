@@ -254,9 +254,12 @@ def main(args: argparse.Namespace) -> None:
     if not args.resume:
         open(log_path, "w").close()  # reset log on fresh run
 
+    HEALTH_LOSS_THRESHOLD = 15.0
+
     if resumed_from_checkpoint:
         print("Validating resumed checkpoint against live data before training...")
         model.eval()
+        health_losses = []
         with torch.no_grad():
             for check_i in range(5):
                 x, y = next(data_iter)
@@ -271,8 +274,17 @@ def main(args: argparse.Namespace) -> None:
                         f"model itself is corrupted/unstable. Re-run with --resume-step set to an "
                         f"earlier checkpoint."
                     )
+                health_losses.append(health_loss.item())
+        avg_health_loss = sum(health_losses) / len(health_losses)
+        if avg_health_loss > HEALTH_LOSS_THRESHOLD:
+            raise RuntimeError(
+                f"Resumed checkpoint {ckpt_path} has an average loss of {avg_health_loss:.2f} over "
+                f"a 5-batch live check — far higher than a healthy training loss, meaning this "
+                f"checkpoint has already diverged even though its weights are finite. Re-run with "
+                f"--resume-step set to an earlier checkpoint."
+            )
         model.train()
-        print("Checkpoint looks healthy — starting training.")
+        print(f"Checkpoint looks healthy (avg loss {avg_health_loss:.2f}) — starting training.")
 
     micro_step = step * args.grad_accum
     tokens_seen = 0
