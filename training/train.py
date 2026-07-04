@@ -162,6 +162,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hf-save-every", type=int, default=None, help="Upload to HF Hub every N steps (default: same as --save-every)")
     p.add_argument("--gist-id", default=None, help="GitHub Gist ID to stream metrics to (for remote monitoring)")
     p.add_argument("--github-token", default=None, help="GitHub token with gist write permission")
+    p.add_argument("--wandb-project", default=None, help="Weights & Biases project name — streams a live dashboard (requires WANDB_API_KEY env var)")
+    p.add_argument("--wandb-run-name", default=None, help="Optional W&B run name (default: auto-generated)")
     return p.parse_args()
 
 
@@ -176,6 +178,12 @@ def main(args: argparse.Namespace) -> None:
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
     hf_save_every = args.hf_save_every if args.hf_save_every is not None else args.save_every
+
+    wandb_run = None
+    if args.wandb_project:
+        import wandb
+        wandb_run = wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
+        print(f"[W&B] Live dashboard: {wandb_run.url}")
 
     tokenizer = DynamoTokenizer(args.tokenizer)
     config = ModelConfig(
@@ -367,6 +375,8 @@ def main(args: argparse.Namespace) -> None:
                 if args.gist_id and args.github_token:
                     with open(log_path) as f:
                         _push_gist(args.gist_id, args.github_token, f.read())
+                if wandb_run is not None:
+                    wandb_run.log({"loss": loss_accum, "lr": lr, "tok_per_sec": tok_per_sec}, step=step)
 
             if step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
@@ -415,6 +425,9 @@ def main(args: argparse.Namespace) -> None:
         print("[HF Hub] Uploading final checkpoint ...")
         t = _hf_upload_checkpoint(args.hf_repo, hf_token, final)
         t.join()
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
