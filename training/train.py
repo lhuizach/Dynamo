@@ -154,6 +154,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--languages", nargs="*", default=None)
     p.add_argument("--no-bnb", action="store_true", help="Use AdamW instead of 8-bit Adam (use if bitsandbytes crashes)")
+    p.add_argument("--no-grad-checkpoint", action="store_true", help="Disable activation checkpointing — faster but uses more VRAM")
     p.add_argument("--resume", action="store_true", help="Resume from latest checkpoint (local or HF Hub)")
     p.add_argument("--resume-step", type=int, default=None, help="Resume from this exact step instead of the latest checkpoint (use to roll back past a corrupted save)")
     p.add_argument("--hf-repo", default=None, help="HuggingFace Hub repo for persistent checkpoint storage (e.g. username/dynamo-checkpoints)")
@@ -187,8 +188,9 @@ def main(args: argparse.Namespace) -> None:
     )
 
     model = Dynamo(config).to(device)
-    for block in model.layers:
-        block.use_checkpoint = True
+    if not args.no_grad_checkpoint:
+        for block in model.layers:
+            block.use_checkpoint = True
 
     step = 0
     resumed_from_checkpoint = False
