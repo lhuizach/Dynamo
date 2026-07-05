@@ -26,7 +26,13 @@ class CodeDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         from datasets import load_dataset
-        dataset = load_dataset("bigcode/the-stack-smol", streaming=True, split="train")
+        # the-stack-smol is not pre-shuffled — samples are grouped (e.g. by
+        # language/repo), so without this the model sees long non-stationary
+        # runs of similar content, which shows up as loss drift unrelated to
+        # any actual training instability.
+        dataset = load_dataset("bigcode/the-stack-smol", streaming=True, split="train").shuffle(
+            seed=42, buffer_size=10_000
+        )
         buffer: List[int] = []
         count = 0
 
