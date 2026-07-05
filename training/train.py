@@ -311,6 +311,12 @@ def main(args: argparse.Namespace) -> None:
     NONFINITE_RATE_THRESHOLD = 0.15
     nonfinite_window: deque = deque(maxlen=NONFINITE_WINDOW)
 
+    # live divergence trend detector — catches a loss that climbs steadily while
+    # staying finite the whole time, which the non-finite checks above can't see
+    DIVERGENCE_FACTOR = 2.5
+    loss_ema: Optional[float] = None
+    best_loss_ema: Optional[float] = None
+
     for x, y in data_iter:
         x, y = x.to(device), y.to(device)
 
@@ -378,6 +384,18 @@ def main(args: argparse.Namespace) -> None:
                 if wandb_run is not None:
                     wandb_run.log({"loss": loss_accum, "lr": lr, "tok_per_sec": tok_per_sec}, step=step)
 
+                loss_ema = loss_accum if loss_ema is None else 0.9 * loss_ema + 0.1 * loss_accum
+                if best_loss_ema is None or loss_ema < best_loss_ema:
+                    best_loss_ema = loss_ema
+                elif step > args.warmup_steps and loss_ema > best_loss_ema * DIVERGENCE_FACTOR:
+                    raise RuntimeError(
+                        f"Loss is diverging: smoothed loss {loss_ema:.2f} at step {step} is over "
+                        f"{DIVERGENCE_FACTOR}x the best smoothed loss seen so far ({best_loss_ema:.2f}). "
+                        f"This is a steady climb, not a single bad batch — the learning rate is likely "
+                        f"too high for this config. Stop and restart with a lower --max-lr, or resume "
+                        f"from a checkpoint saved before the climb started."
+                    )
+
             if step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
                 state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
@@ -390,6 +408,13 @@ def main(args: argparse.Namespace) -> None:
                     print(
                         f"WARNING: checkpoint at step {step} contains NaN/Inf — NOT uploading to "
                         f"HF Hub to avoid poisoning the persisted checkpoint history."
+                    )
+                elif loss_accum > HEALTH_LOSS_THRESHOLD:
+                    ckpt_is_healthy = False
+                    print(
+                        f"WARNING: checkpoint at step {step} has loss {loss_accum:.2f} (over the "
+                        f"{HEALTH_LOSS_THRESHOLD} health threshold) — NOT uploading to HF Hub to avoid "
+                        f"poisoning the persisted checkpoint history."
                     )
 
                 # Wait for any in-flight HF upload before removing old local files
