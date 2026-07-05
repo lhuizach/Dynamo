@@ -356,7 +356,7 @@ def main(args: argparse.Namespace) -> None:
 
         if micro_step % args.grad_accum == 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -369,11 +369,11 @@ def main(args: argparse.Namespace) -> None:
                 dt = time.time() - t0
                 tok_per_sec = tokens_seen / dt if dt > 0 else 0.0
                 print(
-                    f"step {step:6d} | loss {loss_accum:.4f} | lr {lr:.2e} | {tok_per_sec:.0f} tok/s"
+                    f"step {step:6d} | loss {loss_accum:.4f} | lr {lr:.2e} | grad_norm {grad_norm:.2f} | {tok_per_sec:.0f} tok/s"
                 )
                 entry = json.dumps({
                     "step": step, "loss": round(loss_accum, 4),
-                    "lr": lr, "tok_per_sec": round(tok_per_sec),
+                    "lr": lr, "grad_norm": round(grad_norm, 4), "tok_per_sec": round(tok_per_sec),
                     "max_steps": args.max_steps,
                 })
                 with open(log_path, "a") as f:
@@ -382,7 +382,7 @@ def main(args: argparse.Namespace) -> None:
                     with open(log_path) as f:
                         _push_gist(args.gist_id, args.github_token, f.read())
                 if wandb_run is not None:
-                    wandb_run.log({"loss": loss_accum, "lr": lr, "tok_per_sec": tok_per_sec}, step=step)
+                    wandb_run.log({"loss": loss_accum, "lr": lr, "grad_norm": grad_norm, "tok_per_sec": tok_per_sec}, step=step)
 
                 loss_ema = loss_accum if loss_ema is None else 0.9 * loss_ema + 0.1 * loss_accum
                 if best_loss_ema is None or loss_ema < best_loss_ema:
