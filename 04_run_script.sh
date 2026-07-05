@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 1. Train the tokenizer (streams 100k samples from bigcode/the-stack-smol)
+# 1. Train the tokenizer (downloads bigcode/the-stack-smol ~2.6GB, trains on
+#    100k samples drawn evenly across all 30 languages)
 python -m architecture.tokenizer
 
 # 2. Pretrain Dynamo (~760M params, targets 8GB VRAM)

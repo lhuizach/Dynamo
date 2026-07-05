@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import random
 from typing import List
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
@@ -9,6 +10,7 @@ def train_tokenizer(
     output_path: str,
     vocab_size: int = 16384,
     num_samples: int = 100_000,
+    seed: int = 42,
 ) -> None:
     from datasets import load_dataset
     tokenizer = Tokenizer(models.BPE(unk_token="<|unk|>"))
@@ -21,17 +23,35 @@ def train_tokenizer(
         initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
     )
 
-    dataset = load_dataset("bigcode/the-stack-smol", streaming=True, split="train")
+    # the-stack-smol stores its 30 languages as contiguous 10k-row blocks, so
+    # taking the head of the stream fits the entire vocabulary to a single
+    # language. Load the dataset non-streaming (~2.6GB) and draw an equal
+    # number of random rows from every language so each one contributes
+    # subword coverage.
+    dataset = load_dataset("bigcode/the-stack-smol", split="train")
+
+    indices_by_lang: dict = {}
+    for i, lang in enumerate(dataset["lang"]):
+        indices_by_lang.setdefault(lang, []).append(i)
+
+    rng = random.Random(seed)
+    per_lang = max(1, num_samples // len(indices_by_lang))
+    selected: List[int] = []
+    for indices in indices_by_lang.values():
+        rng.shuffle(indices)
+        selected.extend(indices[:per_lang])
+    rng.shuffle(selected)
+    subset = dataset.select(selected)
+    print(
+        f"Sampling {per_lang} rows from each of {len(indices_by_lang)} languages "
+        f"({len(subset)} total) for vocab training"
+    )
 
     def text_iterator():
-        count = 0
-        for sample in dataset:
-            if count >= num_samples:
-                break
+        for sample in subset:
             yield sample["content"]
-            count += 1
 
-    tokenizer.train_from_iterator(text_iterator(), trainer=trainer, length=num_samples)
+    tokenizer.train_from_iterator(text_iterator(), trainer=trainer, length=len(subset))
     tokenizer.decoder = decoders.ByteLevel()
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

@@ -30,6 +30,18 @@ pip install -r requirements.txt
 python -m architecture.tokenizer
 ```
 
+Downloads `bigcode/the-stack-smol` (~2.6GB) and fits the BPE vocabulary on
+100k samples drawn evenly across all 30 languages. The dataset stores each
+language as a contiguous 10k-row block, so sampling must be language-balanced
+— fitting the vocab on the head of the raw stream produces a single-language
+tokenizer that cripples pretraining on everything else.
+
+> **Note:** retraining the tokenizer changes the meaning of every token ID.
+> Checkpoints trained with a previous tokenizer cannot be resumed — training
+> records the tokenizer's SHA-256 in each checkpoint and refuses mismatches.
+> After retraining the tokenizer, start pretraining fresh (no `--resume`) and
+> use an empty HF Hub checkpoint repo.
+
 ### Pretrain
 
 ```bash

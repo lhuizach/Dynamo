@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import glob
+import hashlib
 import json
 import math
 import os
@@ -186,6 +187,11 @@ def main(args: argparse.Namespace) -> None:
         print(f"[W&B] Live dashboard: {wandb_run.url}")
 
     tokenizer = DynamoTokenizer(args.tokenizer)
+    # Fingerprint the tokenizer file: every token ID's meaning depends on it,
+    # so a checkpoint is only resumable with the exact tokenizer it was
+    # trained with. Stored in every checkpoint and verified on resume.
+    with open(args.tokenizer, "rb") as f:
+        tokenizer_sha256 = hashlib.sha256(f.read()).hexdigest()
     config = ModelConfig(
         dim=args.dim,
         n_layers=args.n_layers,
@@ -234,6 +240,16 @@ def main(args: argparse.Namespace) -> None:
                     f"Checkpoint {ckpt_path} contains NaN/Inf in {len(bad_tensors)} tensor(s) "
                     f"(e.g. {bad_tensors[0]}) — this checkpoint is corrupted. "
                     f"Re-run with --resume-step set to an earlier saved step."
+                )
+            ckpt_tok_sha = ckpt.get("tokenizer_sha256")
+            if ckpt_tok_sha != tokenizer_sha256:
+                raise RuntimeError(
+                    f"Checkpoint {ckpt_path} was trained with a different tokenizer "
+                    f"(checkpoint fingerprint: {ckpt_tok_sha or 'none — predates tokenizer tracking'}, "
+                    f"current {args.tokenizer}: {tokenizer_sha256[:12]}...). Token IDs are not "
+                    f"comparable across tokenizers, so resuming would silently corrupt training. "
+                    f"Start a fresh run (drop --resume) and point --hf-repo at an empty repo, or "
+                    f"restore the matching tokenizer file."
                 )
             model.load_state_dict(ckpt["model"])
             step = ckpt["step"]
@@ -399,7 +415,10 @@ def main(args: argparse.Namespace) -> None:
             if step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
                 state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-                torch.save({"step": step, "model": state, "config": config}, ckpt)
+                torch.save(
+                    {"step": step, "model": state, "config": config, "tokenizer_sha256": tokenizer_sha256},
+                    ckpt,
+                )
 
                 ckpt_is_healthy = all(
                     torch.isfinite(t).all() for t in state.values() if torch.is_floating_point(t)
@@ -443,7 +462,10 @@ def main(args: argparse.Namespace) -> None:
 
     final = os.path.join(args.output, "checkpoint_final.pt")
     state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-    torch.save({"step": step, "model": state, "config": config}, final)
+    torch.save(
+        {"step": step, "model": state, "config": config, "tokenizer_sha256": tokenizer_sha256},
+        final,
+    )
     print(f"Saved final checkpoint → {final}")
 
     if args.hf_repo and hf_token:

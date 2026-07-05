@@ -26,13 +26,14 @@ class CodeDataset(IterableDataset):
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         from datasets import load_dataset
-        # the-stack-smol is not pre-shuffled — samples are grouped (e.g. by
-        # language/repo), so without this the model sees long non-stationary
-        # runs of similar content, which shows up as loss drift unrelated to
-        # any actual training instability.
-        dataset = load_dataset("bigcode/the-stack-smol", streaming=True, split="train").shuffle(
-            seed=42, buffer_size=10_000
-        )
+        # the-stack-smol stores its 30 languages as contiguous 10k-row blocks.
+        # A streaming shuffle buffer smaller than or comparable to a block
+        # (e.g. 10k) barely mixes across block boundaries, so the model still
+        # sees long single-language runs — which shows up as loss drift
+        # unrelated to any actual training instability. The dataset is only
+        # ~2.6GB, so load it non-streaming and do a true full-permutation
+        # shuffle instead of an approximate windowed one.
+        dataset = load_dataset("bigcode/the-stack-smol", split="train").shuffle(seed=42)
         buffer: List[int] = []
         count = 0
 
