@@ -274,9 +274,19 @@ def main(args: argparse.Namespace) -> None:
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
     scaler = torch.amp.GradScaler(device, enabled=(device == "cuda" and not use_bf16))
 
-    dataset = CodeDataset(tokenizer, args.seq_len, args.languages)
+    # Fast-forward the deterministic data stream past what earlier sessions
+    # already consumed, so a resumed run continues through the dataset
+    # instead of re-training on the same shuffled head every session.
+    dataset = CodeDataset(
+        tokenizer,
+        args.seq_len,
+        args.languages,
+        skip_sequences=step * args.grad_accum * args.batch_size,
+    )
     loader = DataLoader(dataset, batch_size=args.batch_size)
     data_iter = iter(loader)
+    if step > 0:
+        print(f"Fast-forwarding data stream past {step * args.grad_accum * args.batch_size} consumed sequences ...")
 
     log_path = os.path.join(args.output, "training_log.jsonl")
     if not args.resume:
