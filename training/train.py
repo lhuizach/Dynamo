@@ -11,10 +11,12 @@ import threading
 import time
 import urllib.request
 from collections import deque
-from typing import Optional
+from contextlib import nullcontext
+from typing import Optional, Tuple
 
 from datasets import load_dataset as _load_dataset  # noqa: F401 — must import before torch on Windows
 import torch
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +24,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from architecture.model import Dynamo, ModelConfig
 from architecture.tokenizer import DynamoTokenizer
 from training.data import CodeDataset
+
+
+def _setup_distributed() -> Tuple[int, int, int]:
+    """Initialize torch.distributed when launched via torchrun.
+
+    Returns (rank, world_size, local_rank); (0, 1, 0) for plain `python`
+    launches, which keep the exact single-process behavior.
+    """
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        dist.init_process_group(backend=backend)
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        return dist.get_rank(), dist.get_world_size(), local_rank
+    return 0, 1, 0
 
 
 def _push_gist(gist_id: str, token: str, content: str) -> None:
@@ -169,9 +187,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> None:
-    print(f"Config: {vars(args)}")
+    rank, world_size, local_rank = _setup_distributed()
+    is_main = rank == 0
+    if is_main:
+        print(f"Config: {vars(args)}")
     os.makedirs(args.output, exist_ok=True)
+    # device is the autocast/scaler device *type*; dev is where tensors live
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = f"cuda:{local_rank}" if device == "cuda" else "cpu"
 
     if device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -181,7 +204,7 @@ def main(args: argparse.Namespace) -> None:
     hf_save_every = args.hf_save_every if args.hf_save_every is not None else args.save_every
 
     wandb_run = None
-    if args.wandb_project:
+    if args.wandb_project and is_main:
         import wandb
         wandb_run = wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
         print(f"[W&B] Live dashboard: {wandb_run.url}")
@@ -202,7 +225,7 @@ def main(args: argparse.Namespace) -> None:
         vocab_size=tokenizer.vocab_size,
     )
 
-    model = Dynamo(config).to(device)
+    model = Dynamo(config).to(dev)
     if not args.no_grad_checkpoint:
         for block in model.layers:
             block.use_checkpoint = True
@@ -210,24 +233,30 @@ def main(args: argparse.Namespace) -> None:
     step = 0
     resumed_from_checkpoint = False
     if args.resume:
-        if args.resume_step is not None:
-            wanted = os.path.join(args.output, f"checkpoint_{args.resume_step:06d}.pt")
-            ckpt_path: Optional[str] = wanted if os.path.exists(wanted) else None
-            if ckpt_path:
-                print(f"Found local checkpoint: {ckpt_path}")
-            elif args.hf_repo and hf_token:
-                ckpt_path = _hf_download_latest_checkpoint(
-                    args.hf_repo, hf_token, args.output, resume_step=args.resume_step
-                )
-        else:
-            candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
-            if candidates:
-                ckpt_path = candidates[-1]
-                print(f"Found local checkpoint: {ckpt_path}")
-            elif args.hf_repo and hf_token:
-                ckpt_path = _hf_download_latest_checkpoint(args.hf_repo, hf_token, args.output)
+        # Only rank 0 resolves/downloads the checkpoint; the path is then
+        # broadcast so every rank loads the same file from shared disk.
+        ckpt_path: Optional[str] = None
+        if is_main:
+            if args.resume_step is not None:
+                wanted = os.path.join(args.output, f"checkpoint_{args.resume_step:06d}.pt")
+                ckpt_path = wanted if os.path.exists(wanted) else None
+                if ckpt_path:
+                    print(f"Found local checkpoint: {ckpt_path}")
+                elif args.hf_repo and hf_token:
+                    ckpt_path = _hf_download_latest_checkpoint(
+                        args.hf_repo, hf_token, args.output, resume_step=args.resume_step
+                    )
             else:
-                ckpt_path = None
+                candidates = sorted(glob.glob(os.path.join(args.output, "checkpoint_[0-9]*.pt")))
+                if candidates:
+                    ckpt_path = candidates[-1]
+                    print(f"Found local checkpoint: {ckpt_path}")
+                elif args.hf_repo and hf_token:
+                    ckpt_path = _hf_download_latest_checkpoint(args.hf_repo, hf_token, args.output)
+        if world_size > 1:
+            holder = [ckpt_path]
+            dist.broadcast_object_list(holder, src=0)
+            ckpt_path = holder[0]
 
         if ckpt_path:
             ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -254,12 +283,23 @@ def main(args: argparse.Namespace) -> None:
             model.load_state_dict(ckpt["model"])
             step = ckpt["step"]
             resumed_from_checkpoint = True
-            print(f"Resumed from {ckpt_path} (step {step})")
-        else:
+            if is_main:
+                print(f"Resumed from {ckpt_path} (step {step})")
+        elif is_main:
             print("No checkpoint found — starting from scratch")
 
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs")
+    if world_size > 1:
+        ddp_kwargs = {"gradient_as_bucket_view": True}
+        if device == "cuda":
+            ddp_kwargs["device_ids"] = [local_rank]
+        model = torch.nn.parallel.DistributedDataParallel(model, **ddp_kwargs)
+        if is_main:
+            print(f"Using DistributedDataParallel across {world_size} processes")
+    elif torch.cuda.device_count() > 1:
+        # Legacy single-process fallback. NOTE: with batch_size > 1 this
+        # re-broadcasts all weights every micro-step — launch with torchrun
+        # to use multiple GPUs efficiently.
+        print(f"Using {torch.cuda.device_count()} GPUs (DataParallel — prefer torchrun/DDP)")
         model = torch.nn.DataParallel(model)
 
     if args.no_bnb:
@@ -277,43 +317,59 @@ def main(args: argparse.Namespace) -> None:
     # Fast-forward the deterministic data stream past what earlier sessions
     # already consumed, so a resumed run continues through the dataset
     # instead of re-training on the same shuffled head every session.
+    # Consumption is counted globally across ranks; each rank takes its own
+    # disjoint round-robin shard of the stream.
+    consumed = step * args.grad_accum * args.batch_size * world_size
     dataset = CodeDataset(
         tokenizer,
         args.seq_len,
         args.languages,
-        skip_sequences=step * args.grad_accum * args.batch_size,
+        skip_sequences=consumed,
+        shard_rank=rank,
+        shard_world=world_size,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size)
     data_iter = iter(loader)
-    if step > 0:
-        print(f"Fast-forwarding data stream past {step * args.grad_accum * args.batch_size} consumed sequences ...")
+    if step > 0 and is_main:
+        print(f"Fast-forwarding data stream past {consumed} consumed sequences ...")
 
     log_path = os.path.join(args.output, "training_log.jsonl")
-    if not args.resume:
+    if not args.resume and is_main:
         open(log_path, "w").close()  # reset log on fresh run
 
     HEALTH_LOSS_THRESHOLD = 15.0
 
     if resumed_from_checkpoint:
-        print("Validating resumed checkpoint against live data before training...")
+        if is_main:
+            print("Validating resumed checkpoint against live data before training...")
         model.eval()
         health_losses = []
         with torch.no_grad():
             for check_i in range(5):
                 x, y = next(data_iter)
-                x, y = x.to(device), y.to(device)
+                x, y = x.to(dev), y.to(dev)
                 with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
                     _, health_loss = model(x, y)
                     health_loss = health_loss.mean()
-                if not torch.isfinite(health_loss):
-                    raise RuntimeError(
-                        f"Resumed checkpoint {ckpt_path} produces non-finite loss on live data "
-                        f"(check {check_i + 1}/5) — its weights are individually finite but the "
-                        f"model itself is corrupted/unstable. Re-run with --resume-step set to an "
-                        f"earlier checkpoint."
-                    )
                 health_losses.append(health_loss.item())
-        avg_health_loss = sum(health_losses) / len(health_losses)
+        # Under DDP the verdict must be identical on every rank (a lone raise
+        # would leave the other ranks hanging in the next collective), so
+        # reduce both the finite flag and the average loss before deciding.
+        all_finite = all(math.isfinite(l) for l in health_losses)
+        avg_health_loss = sum(health_losses) / len(health_losses) if all_finite else 0.0
+        if world_size > 1:
+            stats = torch.tensor([1.0 if all_finite else 0.0, avg_health_loss], device=dev)
+            flag = stats[:1].clone()
+            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            all_finite = flag.item() > 0.5
+            avg_health_loss = stats[1].item() / world_size
+        if not all_finite:
+            raise RuntimeError(
+                f"Resumed checkpoint {ckpt_path} produces non-finite loss on live data — its "
+                f"weights are individually finite but the model itself is corrupted/unstable. "
+                f"Re-run with --resume-step set to an earlier checkpoint."
+            )
         if avg_health_loss > HEALTH_LOSS_THRESHOLD:
             raise RuntimeError(
                 f"Resumed checkpoint {ckpt_path} has an average loss of {avg_health_loss:.2f} over "
@@ -322,7 +378,8 @@ def main(args: argparse.Namespace) -> None:
                 f"--resume-step set to an earlier checkpoint."
             )
         model.train()
-        print(f"Checkpoint looks healthy (avg loss {avg_health_loss:.2f}) — starting training.")
+        if is_main:
+            print(f"Checkpoint looks healthy (avg loss {avg_health_loss:.2f}) — starting training.")
 
     micro_step = step * args.grad_accum
     tokens_seen = 0
@@ -344,13 +401,19 @@ def main(args: argparse.Namespace) -> None:
     best_loss_ema: Optional[float] = None
 
     for x, y in data_iter:
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(dev), y.to(dev)
 
         with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
             _, loss = model(x, y)
             loss = loss.mean() / args.grad_accum
 
-        is_finite = torch.isfinite(loss)
+        is_finite = bool(torch.isfinite(loss).item())
+        # DDP ranks must agree on whether to skip this micro-batch, otherwise
+        # their backward counts diverge and the gradient all-reduce deadlocks.
+        if world_size > 1:
+            flag = torch.tensor([1.0 if is_finite else 0.0], device=dev)
+            dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+            is_finite = flag.item() > 0.5
         nonfinite_window.append(0 if is_finite else 1)
         if len(nonfinite_window) == NONFINITE_WINDOW:
             rate = sum(nonfinite_window) / NONFINITE_WINDOW
@@ -364,7 +427,8 @@ def main(args: argparse.Namespace) -> None:
 
         if not is_finite:
             consecutive_nonfinite += 1
-            print(f"WARNING: non-finite loss at step {step} (micro_step {micro_step}) — skipping batch [{consecutive_nonfinite}/{MAX_CONSECUTIVE_NONFINITE}]")
+            if is_main:
+                print(f"WARNING: non-finite loss at step {step} (micro_step {micro_step}) — skipping batch [{consecutive_nonfinite}/{MAX_CONSECUTIVE_NONFINITE}]")
             optimizer.zero_grad()
             if consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE:
                 raise RuntimeError(
@@ -375,7 +439,12 @@ def main(args: argparse.Namespace) -> None:
             continue
         consecutive_nonfinite = 0
 
-        scaler.scale(loss).backward()
+        # Sync gradients across ranks only on the micro-step that completes
+        # an optimizer step; accumulate locally otherwise.
+        will_step = (micro_step + 1) % args.grad_accum == 0
+        sync_ctx = model.no_sync() if (world_size > 1 and not will_step) else nullcontext()
+        with sync_ctx:
+            scaler.scale(loss).backward()
         loss_accum += loss.item()
         micro_step += 1
         tokens_seen += x.numel()
@@ -392,25 +461,33 @@ def main(args: argparse.Namespace) -> None:
                 pg["lr"] = lr
 
             if step % args.log_every == 0:
+                # Average the step loss across ranks so logging and the
+                # divergence detector see the same value everywhere.
+                loss_log = loss_accum
+                if world_size > 1:
+                    t = torch.tensor([loss_accum], device=dev)
+                    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+                    loss_log = t.item() / world_size
                 dt = time.time() - t0
-                tok_per_sec = tokens_seen / dt if dt > 0 else 0.0
-                print(
-                    f"step {step:6d} | loss {loss_accum:.4f} | lr {lr:.2e} | grad_norm {grad_norm:.2f} | {tok_per_sec:.0f} tok/s"
-                )
-                entry = json.dumps({
-                    "step": step, "loss": round(loss_accum, 4),
-                    "lr": lr, "grad_norm": round(grad_norm, 4), "tok_per_sec": round(tok_per_sec),
-                    "max_steps": args.max_steps,
-                })
-                with open(log_path, "a") as f:
-                    f.write(entry + "\n")
-                if args.gist_id and args.github_token:
-                    with open(log_path) as f:
-                        _push_gist(args.gist_id, args.github_token, f.read())
-                if wandb_run is not None:
-                    wandb_run.log({"loss": loss_accum, "lr": lr, "grad_norm": grad_norm, "tok_per_sec": tok_per_sec}, step=step)
+                tok_per_sec = tokens_seen * world_size / dt if dt > 0 else 0.0
+                if is_main:
+                    print(
+                        f"step {step:6d} | loss {loss_log:.4f} | lr {lr:.2e} | grad_norm {grad_norm:.2f} | {tok_per_sec:.0f} tok/s"
+                    )
+                    entry = json.dumps({
+                        "step": step, "loss": round(loss_log, 4),
+                        "lr": lr, "grad_norm": round(grad_norm, 4), "tok_per_sec": round(tok_per_sec),
+                        "max_steps": args.max_steps,
+                    })
+                    with open(log_path, "a") as f:
+                        f.write(entry + "\n")
+                    if args.gist_id and args.github_token:
+                        with open(log_path) as f:
+                            _push_gist(args.gist_id, args.github_token, f.read())
+                    if wandb_run is not None:
+                        wandb_run.log({"loss": loss_log, "lr": lr, "grad_norm": grad_norm, "tok_per_sec": tok_per_sec}, step=step)
 
-                loss_ema = loss_accum if loss_ema is None else 0.9 * loss_ema + 0.1 * loss_accum
+                loss_ema = loss_log if loss_ema is None else 0.9 * loss_ema + 0.1 * loss_log
                 if best_loss_ema is None or loss_ema < best_loss_ema:
                     best_loss_ema = loss_ema
                 elif step > args.warmup_steps and loss_ema > best_loss_ema * DIVERGENCE_FACTOR:
@@ -422,7 +499,7 @@ def main(args: argparse.Namespace) -> None:
                         f"from a checkpoint saved before the climb started."
                     )
 
-            if step > 0 and step % args.save_every == 0:
+            if is_main and step > 0 and step % args.save_every == 0:
                 ckpt = os.path.join(args.output, f"checkpoint_{step:06d}.pt")
                 state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
                 torch.save(
@@ -465,26 +542,30 @@ def main(args: argparse.Namespace) -> None:
             if step >= args.max_steps:
                 break
 
-    # Ensure final HF upload completes before exit
-    if upload_thread and upload_thread.is_alive():
-        print("[HF Hub] Waiting for final upload to finish...")
-        upload_thread.join()
+    if is_main:
+        # Ensure final HF upload completes before exit
+        if upload_thread and upload_thread.is_alive():
+            print("[HF Hub] Waiting for final upload to finish...")
+            upload_thread.join()
 
-    final = os.path.join(args.output, "checkpoint_final.pt")
-    state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
-    torch.save(
-        {"step": step, "model": state, "config": config, "tokenizer_sha256": tokenizer_sha256},
-        final,
-    )
-    print(f"Saved final checkpoint → {final}")
+        final = os.path.join(args.output, "checkpoint_final.pt")
+        state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
+        torch.save(
+            {"step": step, "model": state, "config": config, "tokenizer_sha256": tokenizer_sha256},
+            final,
+        )
+        print(f"Saved final checkpoint → {final}")
 
-    if args.hf_repo and hf_token:
-        print("[HF Hub] Uploading final checkpoint ...")
-        t = _hf_upload_checkpoint(args.hf_repo, hf_token, final)
-        t.join()
+        if args.hf_repo and hf_token:
+            print("[HF Hub] Uploading final checkpoint ...")
+            t = _hf_upload_checkpoint(args.hf_repo, hf_token, final)
+            t.join()
 
     if wandb_run is not None:
         wandb_run.finish()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

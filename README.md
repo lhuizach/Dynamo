@@ -45,8 +45,19 @@ tokenizer that cripples pretraining on everything else.
 ### Pretrain
 
 ```bash
+# single GPU
 python training/train.py --tokenizer tokenizer/dynamo.json --output dynamo/
+
+# multi-GPU (DDP) — one process per GPU; each rank trains a disjoint shard
+# of the data stream, so tokens per optimizer step scale with process count
+torchrun --standalone --nproc_per_node=2 training/train.py \
+  --tokenizer tokenizer/dynamo.json --output dynamo/
 ```
+
+Keep the launch mode, `--batch-size`, and `--grad-accum` identical across
+every session of one run — a resumed session uses them to compute how much
+of the data stream previous sessions consumed. Mechanics are covered by
+`python scripts/ddp_smoke_test.py` (2-process CPU run, no GPU/network).
 
 ### SFT
 

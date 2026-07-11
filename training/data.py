@@ -20,6 +20,8 @@ class CodeDataset(IterableDataset):
         num_samples: Optional[int] = None,
         skip_sequences: int = 0,
         base_seed: int = 42,
+        shard_rank: int = 0,
+        shard_world: int = 1,
     ) -> None:
         self.tokenizer = tokenizer
         self.seq_len = seq_len
@@ -27,6 +29,8 @@ class CodeDataset(IterableDataset):
         self.num_samples = num_samples
         self.skip_sequences = skip_sequences
         self.base_seed = base_seed
+        self.shard_rank = shard_rank
+        self.shard_world = shard_world
 
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         from datasets import load_dataset
@@ -47,7 +51,13 @@ class CodeDataset(IterableDataset):
         # one fixed order. When num_samples is set the dataset is a single
         # bounded pass (used for quick experiments); otherwise it is
         # infinite and the training loop's --max-steps is the terminator.
-        to_skip = self.skip_sequences
+        #
+        # Under DDP every rank iterates the identical stream and takes
+        # sequences round-robin by global index, so the shards are disjoint
+        # and skip_sequences (a GLOBAL count across all ranks) stays
+        # meaningful: skipping N total puts every rank exactly where it
+        # left off, because rank assignment i % shard_world is stable.
+        seq_index = 0
         epoch = 0
         while True:
             shuffled = dataset.shuffle(seed=self.base_seed + epoch)
@@ -67,8 +77,11 @@ class CodeDataset(IterableDataset):
                 while len(buffer) >= self.seq_len + 1:
                     chunk = buffer[: self.seq_len + 1]
                     buffer = buffer[self.seq_len + 1 :]
-                    if to_skip > 0:
-                        to_skip -= 1
+                    i = seq_index
+                    seq_index += 1
+                    if i < self.skip_sequences:
+                        continue
+                    if i % self.shard_world != self.shard_rank:
                         continue
                     x = torch.tensor(chunk[:-1], dtype=torch.long)
                     y = torch.tensor(chunk[1:], dtype=torch.long)
