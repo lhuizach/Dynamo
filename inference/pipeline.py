@@ -8,10 +8,9 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from architecture.model import Dynamo, ModelConfig
+from architecture.prompt import build_prompt, sanitize_router_output
 from architecture.tokenizer import DynamoTokenizer
 
-
-PROMPT_TEMPLATE = "User request: {user_request}\nRouter output: {precise_instruction}\n"
 
 _ROUTER_SYSTEM = (
     "Convert the user's vague coding request into a single precise technical "
@@ -88,14 +87,13 @@ class DynamoPipeline:
         self._router = RouterModel()
 
     def run(self, user_request: str, show_router: bool = False) -> str:
-        precise_instruction = self._router.translate(user_request)
+        raw_instruction = self._router.translate(user_request)
+        # fall back to the user's own words rather than an empty Router line
+        precise_instruction = sanitize_router_output(raw_instruction) or user_request.strip()
         if show_router:
             print(f"[router] {precise_instruction}")
 
-        prompt = PROMPT_TEMPLATE.format(
-            user_request=user_request,
-            precise_instruction=precise_instruction,
-        )
+        prompt = build_prompt(user_request, precise_instruction)
         input_ids = self.tokenizer.encode(prompt)
         idx = torch.tensor([input_ids], dtype=torch.long, device=self.device)
 
@@ -103,6 +101,7 @@ class DynamoPipeline:
             idx,
             max_new_tokens=self.max_new_tokens,
             temperature=self.temperature,
+            eos_id=self.tokenizer.eos_id,
         )
         generated = output_ids[0][len(input_ids) :].tolist()
         return self.tokenizer.decode(generated)

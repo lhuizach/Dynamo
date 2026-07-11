@@ -70,13 +70,15 @@ python dynamo_cli.py --interactive --show-router
 ## File Map
 
 ```
-architecture/      model definition (model.py), tokenizer training (tokenizer.py)
+architecture/      model definition (model.py), tokenizer training (tokenizer.py),
+                   router↔model prompt contract and output sanitizer (prompt.py)
 training/          pretraining loop (train.py), SFT (sft.py), dataset streaming (data.py)
 inference/         two-stage router + dynamo pipeline (pipeline.py)
 dynamo_cli.py      CLI entrypoint (argparse, single-shot and REPL modes)
 dynamo/            trained model checkpoints — git-ignored, created after training
 dynamo-train/      SFT training data in JSONL format — git-ignored
 tokenizer/         trained tokenizer JSON — git-ignored, created after tokenizer training
-03_modelfile.txt   prompt template shared by sft.py and pipeline.py
+03_modelfile.txt   legacy copy of the prompt template — the canonical
+                   definition lives in architecture/prompt.py
 05_dataset_sample.jsonl   example SFT records showing the expected data format
 ```

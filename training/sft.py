@@ -13,13 +13,8 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from architecture.model import Dynamo, ModelConfig
+from architecture.prompt import build_prompt
 from architecture.tokenizer import DynamoTokenizer
-
-
-# Used when precise_instruction is present (local JSONL format)
-PROMPT_TEMPLATE_FULL = "User request: {user_request}\nRouter output: {precise_instruction}\n"
-# Used when loading from a HF dataset (instruction only)
-PROMPT_TEMPLATE_SIMPLE = "User request: {user_request}\n"
 
 
 def load_local_records(data_dir: str) -> List[dict]:
@@ -59,13 +54,14 @@ def build_sample(
     record: dict,
     tokenizer: DynamoTokenizer,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if "precise_instruction" in record:
-        prompt = PROMPT_TEMPLATE_FULL.format(
-            user_request=record["user_request"],
-            precise_instruction=record["precise_instruction"],
-        )
-    else:
-        prompt = PROMPT_TEMPLATE_SIMPLE.format(user_request=record["user_request"])
+    # Inference always presents the full "User request:/Router output:"
+    # prefix, so training must too. HF instruction datasets carry only one
+    # text field, but those instructions are already precise — let them
+    # stand in for the router line as well.
+    prompt = build_prompt(
+        user_request=record["user_request"],
+        precise_instruction=record.get("precise_instruction") or record["user_request"],
+    )
 
     full = prompt + record["code"]
     prompt_ids = tokenizer.encode(prompt)

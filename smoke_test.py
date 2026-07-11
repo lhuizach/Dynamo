@@ -17,11 +17,11 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from architecture.model import Dynamo, ModelConfig
+from architecture.prompt import build_prompt, sanitize_router_output
 from architecture.tokenizer import DynamoTokenizer
 
 
 SAMPLE_FILE = "05_dataset_sample.jsonl"
-PROMPT_TEMPLATE = "User request: {user_request}\nRouter output: {precise_instruction}\n"
 
 
 def _build_mini_tokenizer(save_path: str, vocab_size: int = 512) -> None:
@@ -49,7 +49,7 @@ def _build_sft_sample(
     tokenizer: DynamoTokenizer,
     max_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    prompt = PROMPT_TEMPLATE.format(
+    prompt = build_prompt(
         user_request=record["user_request"],
         precise_instruction=record["precise_instruction"],
     )
@@ -69,9 +69,32 @@ def _build_sft_sample(
     return x, y, mask
 
 
+def _check_sanitizer() -> None:
+    want = "Write a Python function named `retry` that retries a callable."
+    cases = [
+        want,
+        f"Sure, here's the instruction: {want}",
+        f"Instruction:\n{want}",
+        f'"{want}"',
+        f"```\n{want}\n```",
+        f"{want}\n\nThis instruction covers the retry behaviour you asked for.",
+        f"Write a Python function named `retry`\nthat retries a callable.",
+    ]
+    for raw in cases:
+        got = sanitize_router_output(raw)
+        assert got == want, f"sanitize failed:\n  raw={raw!r}\n  got={got!r}"
+    assert sanitize_router_output("   ") == ""
+    long = sanitize_router_output("word " * 1000)
+    assert len(long) <= 1200 and not long.endswith(" ")
+
+
 def main() -> None:
     tmpdir = tempfile.mkdtemp()
     tok_path = os.path.join(tmpdir, "mini.json")
+
+    print("0/5  sanitizing router output edge cases...")
+    _check_sanitizer()
+    print("     preamble/fence/quote/multiline/truncation cases OK")
 
     print("1/5  building mini tokenizer from sample records (no network)...")
     _build_mini_tokenizer(tok_path)
